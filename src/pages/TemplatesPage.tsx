@@ -291,25 +291,27 @@ export default function TemplatesPage() {
                     <option value="text">Free text</option>
                   </select>
 
-                  {(q.type === 'multi' || q.type === 'rating') && (
-                    <input
-                      className="border rounded-xl px-3 py-1 text-xs"
-                      placeholder={
-                        q.type === 'rating'
-                          ? 'Options (comma separated, default Good, Fair, Poor)'
-                          : 'Options (comma separated)'
-                      }
-                      value={(q.options || []).join(', ')}
-                      onChange={e =>
-                        updateQuestion(q.id, {
-                          options: e.target.value
-                            .split(',')
-                            .map(s => s.trim())
-                            .filter(Boolean),
-                        })
-                      }
-                    />
-                  )}
+        (q.type === 'multi' || q.type === 'rating') && (
+  <input
+    className="border rounded-xl px-3 py-1 text-xs"
+    placeholder={
+      q.type === 'rating'
+        ? 'Options (comma separated: Good, Fair, Poor)'
+        : 'Options (comma separated)'
+    }
+    value={q._optionsText ?? (q.options || []).join(', ')}
+    onChange={(e) => {
+      const text = e.target.value
+      updateQuestion(q.id, { 
+        _optionsText: text, 
+        options: text
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+      })
+    }}
+  />
+)
                 </div>
               </div>
             ))}
