@@ -7,12 +7,15 @@ type Question = {
   label: string
   type: QuestionType
   options?: string[]
+  instruction?: string
+  refImages?: string[]
 }
 
 type Template = {
   id: string
   name: string
   site?: string
+  logoDataUrl?: string
   questions: Question[]
 }
 
@@ -21,6 +24,8 @@ type AnswerRow = {
   label: string
   type: QuestionType
   options?: string[]
+  instruction?: string
+  refImages?: string[]
   answer: string
   note?: string
   photos?: string[]
@@ -31,6 +36,7 @@ type Inspection = {
   templateId: string
   templateName: string
   site?: string
+  logoDataUrl?: string
   startedAt: string
   completedAt?: string
   answers: AnswerRow[]
@@ -60,6 +66,8 @@ function normaliseQuestions(raw: any): Question[] {
       ? q.type
       : ('yesno' as QuestionType),
     options: Array.isArray(q.options) ? q.options : undefined,
+    instruction: typeof q.instruction === 'string' ? q.instruction : undefined,
+    refImages: Array.isArray(q.refImages) ? q.refImages : undefined,
   }))
 }
 
@@ -73,6 +81,7 @@ function loadTemplates(): Template[] {
       id: t.id || makeId(),
       name: t.name || 'Untitled',
       site: t.site || '',
+      logoDataUrl: t.logoDataUrl || undefined,
       questions: normaliseQuestions(t.questions),
     }))
   } catch {
@@ -116,6 +125,8 @@ export default function InspectionsPage() {
       label: q.label,
       type: q.type,
       options: q.options,
+      instruction: q.instruction,
+      refImages: q.refImages,
       answer: '',
       note: '',
       photos: [],
@@ -125,6 +136,7 @@ export default function InspectionsPage() {
       templateId: tpl.id,
       templateName: tpl.name,
       site: tpl.site,
+      logoDataUrl: tpl.logoDataUrl,
       startedAt: new Date().toISOString(),
       answers,
     }
@@ -174,7 +186,7 @@ export default function InspectionsPage() {
   }
 
   const saveInspectionProgress = () => {
-    // nothing special to do; answers already synced to list via setAnswer
+    // answers already synced to list via setAnswer
     setActive(null)
   }
 
@@ -305,12 +317,23 @@ export default function InspectionsPage() {
 
     const rowsHtml = insp.answers
       .map((a, idx) => {
-        const photosHtml =
-          a.photos && a.photos.length
-            ? a.photos
+        const refHtml =
+          a.refImages && a.refImages.length
+            ? `<div style="margin-bottom:4px;font-size:10px;color:#6b7280;">Reference:</div>` +
+              a.refImages
                 .map(
                   src =>
-                    `<img src="${src}" style="width:64px;height:64px;object-fit:cover;border-radius:4px;border:1px solid #ddd;margin-right:4px;margin-top:4px;" />`,
+                    `<img src="${src}" style="width:56px;height:56px;object-fit:cover;border-radius:4px;border:1px solid #ddd;margin-right:4px;margin-top:2px;" />`,
+                )
+                .join('')
+            : ''
+        const photosHtml =
+          a.photos && a.photos.length
+            ? `<div style="margin-top:6px;margin-bottom:2px;font-size:10px;color:#6b7280;">Evidence:</div>` +
+              a.photos
+                .map(
+                  src =>
+                    `<img src="${src}" style="width:64px;height:64px;object-fit:cover;border-radius:4px;border:1px solid #ddd;margin-right:4px;margin-top:2px;" />`,
                 )
                 .join('')
             : ''
@@ -318,6 +341,13 @@ export default function InspectionsPage() {
           <tr>
             <td style="padding:8px;border:1px solid #ddd;vertical-align:top;">
               <strong>${idx + 1}. ${escapeHtml(a.label || '')}</strong>
+              ${
+                a.instruction
+                  ? `<div style="margin-top:4px;font-size:11px;color:#6b7280;">${escapeHtml(
+                      a.instruction,
+                    )}</div>`
+                  : ''
+              }
             </td>
             <td style="padding:8px;border:1px solid #ddd;vertical-align:top;">
               ${escapeHtml(a.answer || '—')}
@@ -326,12 +356,16 @@ export default function InspectionsPage() {
               ${a.note ? escapeHtml(a.note) : ''}
             </td>
             <td style="padding:8px;border:1px solid #ddd;vertical-align:top;">
-              ${photosHtml}
+              ${refHtml}${photosHtml}
             </td>
           </tr>
         `
       })
       .join('')
+
+    const logoHtml = insp.logoDataUrl
+      ? `<img src="${insp.logoDataUrl}" style="width:32px;height:32px;border-radius:999px;object-fit:cover;border:1px solid #e5e7eb;" />`
+      : `<div style="width:32px;height:32px;border-radius:999px;background:linear-gradient(135deg,#3730a3,#facc15);"></div>`
 
     const html = `
       <!DOCTYPE html>
@@ -343,7 +377,7 @@ export default function InspectionsPage() {
         <body style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding:24px; background:#ffffff; color:#111827;">
           <header style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;">
             <div style="display:flex;align-items:center;gap:8px;">
-              <div style="width:32px;height:32px;border-radius:999px;background:linear-gradient(135deg,#3730a3,#facc15);"></div>
+              ${logoHtml}
               <div style="font-weight:800;font-size:18px;color:#312e81;">
                 Audit <span style="color:#facc15;">King</span>
               </div>
@@ -369,7 +403,7 @@ export default function InspectionsPage() {
                 <th style="text-align:left;padding:8px;border:1px solid #ddd;background:#f3f4f6;">Question</th>
                 <th style="text-align:left;padding:8px;border:1px solid #ddd;background:#f3f4f6;">Answer</th>
                 <th style="text-align:left;padding:8px;border:1px solid #ddd;background:#f3f4f6;">Note</th>
-                <th style="text-align:left;padding:8px;border:1px solid #ddd;background:#f3f4f6;">Photos</th>
+                <th style="text-align:left;padding:8px;border:1px solid #ddd;background:#f3f4f6;">Images</th>
               </tr>
             </thead>
             <tbody>
@@ -402,8 +436,8 @@ export default function InspectionsPage() {
         <div>
           <h1 className="text-2xl font-bold text-royal-700">Inspections</h1>
           <p className="text-sm text-gray-600">
-            Run SafetyCulture-style inspections with buttons for responses, notes, and photos. Save
-            in progress or complete and export.
+            Run inspections with reference images and instructions, save in progress, or complete
+            and export as PDF.
           </p>
         </div>
       </div>
@@ -424,10 +458,19 @@ export default function InspectionsPage() {
                 <button
                   key={t.id}
                   onClick={() => startInspection(t)}
-                  className="px-3 py-2 rounded-xl border text-sm bg-white hover:bg-gray-50"
+                  className="px-3 py-2 rounded-xl border text-sm bg-white hover:bg-gray-50 flex items-center gap-2"
                 >
-                  {t.name}
-                  {t.site ? ` — ${t.site}` : ''}
+                  {t.logoDataUrl && (
+                    <img
+                      src={t.logoDataUrl}
+                      alt="logo"
+                      className="w-5 h-5 rounded-full object-cover border"
+                    />
+                  )}
+                  <span>
+                    {t.name}
+                    {t.site ? ` — ${t.site}` : ''}
+                  </span>
                 </button>
               ))}
             </div>
@@ -446,11 +489,20 @@ export default function InspectionsPage() {
                 key={insp.id}
                 className="bg-white border rounded-2xl p-4 flex flex-col md:flex-row justify-between gap-3 text-sm"
               >
-                <div>
-                  <div className="font-semibold text-royal-700">{insp.templateName}</div>
-                  {insp.site && <div className="text-xs text-gray-500">Site: {insp.site}</div>}
-                  <div className="text-xs text-gray-500">
-                    Started: {insp.startedAt.slice(0, 16).replace('T', ' ')}
+                <div className="flex items-start gap-2">
+                  {insp.logoDataUrl && (
+                    <img
+                      src={insp.logoDataUrl}
+                      alt="logo"
+                      className="w-8 h-8 rounded-full object-cover border"
+                    />
+                  )}
+                  <div>
+                    <div className="font-semibold text-royal-700">{insp.templateName}</div>
+                    {insp.site && <div className="text-xs text-gray-500">Site: {insp.site}</div>}
+                    <div className="text-xs text-gray-500">
+                      Started: {insp.startedAt.slice(0, 16).replace('T', ' ')}
+                    </div>
                   </div>
                 </div>
                 <div className="flex gap-2 items-center">
@@ -482,9 +534,18 @@ export default function InspectionsPage() {
             {completed.map(insp => (
               <div key={insp.id} className="bg-white border rounded-2xl p-4">
                 <div className="flex justify-between text-sm">
-                  <div>
-                    <div className="font-semibold text-royal-700">{insp.templateName}</div>
-                    {insp.site && <div className="text-xs text-gray-500">Site: {insp.site}</div>}
+                  <div className="flex items-start gap-2">
+                    {insp.logoDataUrl && (
+                      <img
+                        src={insp.logoDataUrl}
+                        alt="logo"
+                        className="w-8 h-8 rounded-full object-cover border"
+                      />
+                    )}
+                    <div>
+                      <div className="font-semibold text-royal-700">{insp.templateName}</div>
+                      {insp.site && <div className="text-xs text-gray-500">Site: {insp.site}</div>}
+                    </div>
                   </div>
                   <div className="text-xs text-gray-500 text-right">
                     <div>Started: {insp.startedAt.slice(0, 16).replace('T', ' ')}</div>
@@ -502,18 +563,41 @@ export default function InspectionsPage() {
                           <div className="font-semibold">
                             {i + 1}. {a.label}
                           </div>
+                          {a.instruction && (
+                            <div className="text-[11px] text-gray-500 mt-1">
+                              {a.instruction}
+                            </div>
+                          )}
                           <div>Answer: {a.answer || '—'}</div>
                           {a.note && <div>Note: {a.note}</div>}
+                          {(a.refImages && a.refImages.length > 0) && (
+                            <div className="mt-1">
+                              <div className="text-[11px] text-gray-500 mb-1">Reference:</div>
+                              <div className="flex flex-wrap gap-2">
+                                {a.refImages.map((src, idx) => (
+                                  <img
+                                    key={idx}
+                                    src={src}
+                                    alt="reference"
+                                    className="h-10 w-10 object-cover rounded-md border"
+                                  />
+                                ))}
+                              </div>
+                            </div>
+                          )}
                           {a.photos && a.photos.length > 0 && (
-                            <div className="flex flex-wrap gap-2 mt-1">
-                              {a.photos.map((src, idx) => (
-                                <img
-                                  key={idx}
-                                  src={src}
-                                  alt="evidence"
-                                  className="h-12 w-12 object-cover rounded-md border"
-                                />
-                              ))}
+                            <div className="mt-1">
+                              <div className="text-[11px] text-gray-500 mb-1">Evidence:</div>
+                              <div className="flex flex-wrap gap-2">
+                                {a.photos.map((src, idx) => (
+                                  <img
+                                    key={idx}
+                                    src={src}
+                                    alt="evidence"
+                                    className="h-10 w-10 object-cover rounded-md border"
+                                  />
+                                ))}
+                              </div>
                             </div>
                           )}
                         </li>
@@ -537,11 +621,20 @@ export default function InspectionsPage() {
       {active && (
         <div className="bg-white border rounded-2xl p-4 space-y-3">
           <div className="flex justify-between items-center">
-            <div>
-              <h2 className="font-semibold text-royal-700">{active.templateName}</h2>
-              {active.site && <div className="text-xs text-gray-500">Site: {active.site}</div>}
-              <div className="text-xs text-gray-500">
-                Started: {active.startedAt.slice(0, 16).replace('T', ' ')}
+            <div className="flex items-start gap-2">
+              {active.logoDataUrl && (
+                <img
+                  src={active.logoDataUrl}
+                  alt="logo"
+                  className="w-8 h-8 rounded-full object-cover border"
+                />
+              )}
+              <div>
+                <h2 className="font-semibold text-royal-700">{active.templateName}</h2>
+                {active.site && <div className="text-xs text-gray-500">Site: {active.site}</div>}
+                <div className="text-xs text-gray-500">
+                  Started: {active.startedAt.slice(0, 16).replace('T', ' ')}
+                </div>
               </div>
             </div>
             <div className="flex gap-2">
@@ -566,6 +659,21 @@ export default function InspectionsPage() {
                 <div className="font-semibold">
                   {index + 1}. {row.label}
                 </div>
+                {row.instruction && (
+                  <div className="text-[11px] text-gray-500">{row.instruction}</div>
+                )}
+                {row.refImages && row.refImages.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mt-1">
+                    {row.refImages.map((src, idx) => (
+                      <img
+                        key={idx}
+                        src={src}
+                        alt="reference"
+                        className="h-10 w-10 object-cover rounded-md border"
+                      />
+                    ))}
+                  </div>
+                )}
                 {renderAnswerInput(row, index)}
                 <textarea
                   className="w-full border rounded-xl px-3 py-1 text-xs mt-2"
