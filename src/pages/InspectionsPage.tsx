@@ -45,13 +45,14 @@ const makeId = () =>
 function normaliseQuestions(raw: any): Question[] {
   if (!Array.isArray(raw) || raw.length === 0) return []
   if (typeof raw[0] === 'string') {
-    // old schema: strings only
+    // very old schema: strings only
     return raw.map((label: string) => ({
       id: makeId(),
       label,
       type: 'yesno' as QuestionType,
     }))
   }
+  // new schema: typed questions
   return raw.map((q: any, idx: number) => ({
     id: q.id || `q${idx + 1}`,
     label: q.label || String(q),
@@ -127,7 +128,17 @@ export default function InspectionsPage() {
       startedAt: new Date().toISOString(),
       answers,
     }
+    // add to list immediately so it's "in progress" and survives reload
+    setInspections(prev => [insp, ...prev])
     setActive(insp)
+  }
+
+  const resumeInspection = (insp: Inspection) => {
+    setActive(insp)
+  }
+
+  const updateInspectionInList = (updated: Inspection) => {
+    setInspections(prev => prev.map(i => (i.id === updated.id ? updated : i)))
   }
 
   const setAnswer = (index: number, patch: Partial<AnswerRow>) => {
@@ -137,6 +148,7 @@ export default function InspectionsPage() {
       answers: active.answers.map((a, i) => (i === index ? { ...a, ...patch } : a)),
     }
     setActive(updated)
+    updateInspectionInList(updated) // autosave progress
   }
 
   const handlePhotoChange = (index: number, files: FileList | null) => {
@@ -161,15 +173,30 @@ export default function InspectionsPage() {
     })
   }
 
-  const saveInspection = () => {
+  const saveInspectionProgress = () => {
+    // nothing special to do; answers already synced to list via setAnswer
+    setActive(null)
+  }
+
+  const discardInspection = () => {
+    if (!active) return
+    if (!confirm('Discard this inspection? This cannot be undone.')) return
+    setInspections(prev => prev.filter(i => i.id !== active.id))
+    setActive(null)
+  }
+
+  const completeInspection = () => {
     if (!active) return
     const done: Inspection = {
       ...active,
       completedAt: new Date().toISOString(),
     }
-    setInspections(prev => [done, ...prev])
     setActive(null)
+    updateInspectionInList(done)
   }
+
+  const inProgress = inspections.filter(i => !i.completedAt)
+  const completed = inspections.filter(i => i.completedAt)
 
   const renderAnswerInput = (row: AnswerRow, index: number) => {
     if (row.type === 'yesno') {
@@ -196,7 +223,8 @@ export default function InspectionsPage() {
     }
 
     if (row.type === 'rating') {
-      const options = row.options && row.options.length ? row.options : ['Good', 'Fair', 'Poor']
+      const options =
+        row.options && row.options.length ? row.options : ['Good', 'Fair', 'Poor']
       return (
         <div className="flex flex-wrap gap-2">
           {options.map(opt => (
@@ -257,19 +285,133 @@ export default function InspectionsPage() {
     )
   }
 
+  const openPdfWindow = (insp: Inspection) => {
+    const w = window.open('', '_blank', 'width=900,height=1000')
+    if (!w) {
+      alert('Popup blocked. Please allow popups for this site to download the PDF.')
+      return
+    }
+
+    const started = new Date(insp.startedAt).toLocaleString()
+    const completed = insp.completedAt
+      ? new Date(insp.completedAt).toLocaleString()
+      : '—'
+
+    const escapeHtml = (str: string) =>
+      str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+
+    const rowsHtml = insp.answers
+      .map((a, idx) => {
+        const photosHtml =
+          a.photos && a.photos.length
+            ? a.photos
+                .map(
+                  src =>
+                    `<img src="${src}" style="width:64px;height:64px;object-fit:cover;border-radius:4px;border:1px solid #ddd;margin-right:4px;margin-top:4px;" />`,
+                )
+                .join('')
+            : ''
+        return `
+          <tr>
+            <td style="padding:8px;border:1px solid #ddd;vertical-align:top;">
+              <strong>${idx + 1}. ${escapeHtml(a.label || '')}</strong>
+            </td>
+            <td style="padding:8px;border:1px solid #ddd;vertical-align:top;">
+              ${escapeHtml(a.answer || '—')}
+            </td>
+            <td style="padding:8px;border:1px solid #ddd;vertical-align:top;">
+              ${a.note ? escapeHtml(a.note) : ''}
+            </td>
+            <td style="padding:8px;border:1px solid #ddd;vertical-align:top;">
+              ${photosHtml}
+            </td>
+          </tr>
+        `
+      })
+      .join('')
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <title>Audit King Report</title>
+        </head>
+        <body style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding:24px; background:#ffffff; color:#111827;">
+          <header style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <div style="width:32px;height:32px;border-radius:999px;background:linear-gradient(135deg,#3730a3,#facc15);"></div>
+              <div style="font-weight:800;font-size:18px;color:#312e81;">
+                Audit <span style="color:#facc15;">King</span>
+              </div>
+            </div>
+            <div style="font-size:12px;color:#6b7280;">Inspection report</div>
+          </header>
+
+          <h1 style="font-size:20px;font-weight:700;color:#111827;margin-bottom:4px;">
+            ${escapeHtml(insp.templateName || '')}
+          </h1>
+          <p style="font-size:13px;color:#4b5563;margin:0 0 16px 0;">
+            Site: <strong>${escapeHtml(insp.site || '—')}</strong>
+          </p>
+
+          <div style="font-size:12px;color:#4b5563;margin-bottom:16px;">
+            <div>Started: <strong>${started}</strong></div>
+            <div>Completed: <strong>${completed}</strong></div>
+          </div>
+
+          <table style="width:100%;border-collapse:collapse;font-size:12px;">
+            <thead>
+              <tr>
+                <th style="text-align:left;padding:8px;border:1px solid #ddd;background:#f3f4f6;">Question</th>
+                <th style="text-align:left;padding:8px;border:1px solid #ddd;background:#f3f4f6;">Answer</th>
+                <th style="text-align:left;padding:8px;border:1px solid #ddd;background:#f3f4f6;">Note</th>
+                <th style="text-align:left;padding:8px;border:1px solid #ddd;background:#f3f4f6;">Photos</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml}
+            </tbody>
+          </table>
+
+          <p style="font-size:11px;color:#9ca3af;margin-top:24px;">
+            Generated by Audit King Pro. Use your browser's "Save as PDF" option when printing.
+          </p>
+
+          <script>
+            window.onload = function () {
+              window.print();
+            };
+          </script>
+        </body>
+      </html>
+    `
+
+    w.document.open()
+    w.document.write(html)
+    w.document.close()
+    w.focus()
+  }
+
   return (
     <div className="max-w-5xl mx-auto py-6 space-y-6">
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
         <div>
           <h1 className="text-2xl font-bold text-royal-700">Inspections</h1>
           <p className="text-sm text-gray-600">
-            Run SafetyCulture-style inspections with buttons for responses, notes, and photos.
+            Run SafetyCulture-style inspections with buttons for responses, notes, and photos. Save
+            in progress or complete and export.
           </p>
         </div>
       </div>
 
+      {/* No active inspection: show lists */}
       {!active && (
         <>
+          {/* Start new */}
           <div className="bg-white border rounded-2xl p-4">
             <h2 className="font-semibold mb-2 text-royal-700">Start new inspection</h2>
             {templates.length === 0 && (
@@ -291,14 +433,53 @@ export default function InspectionsPage() {
             </div>
           </div>
 
-          <div className="space-y-3">
-            <h2 className="font-semibold text-sm text-gray-700">Past inspections</h2>
-            {inspections.length === 0 && (
+          {/* In-progress inspections */}
+          <div className="space-y-2">
+            <h2 className="font-semibold text-sm text-gray-700">In-progress inspections</h2>
+            {inProgress.length === 0 && (
               <div className="bg-white border rounded-2xl p-4 text-sm text-gray-600">
-                No inspections yet.
+                No in-progress inspections.
               </div>
             )}
-            {inspections.map(insp => (
+            {inProgress.map(insp => (
+              <div
+                key={insp.id}
+                className="bg-white border rounded-2xl p-4 flex flex-col md:flex-row justify-between gap-3 text-sm"
+              >
+                <div>
+                  <div className="font-semibold text-royal-700">{insp.templateName}</div>
+                  {insp.site && <div className="text-xs text-gray-500">Site: {insp.site}</div>}
+                  <div className="text-xs text-gray-500">
+                    Started: {insp.startedAt.slice(0, 16).replace('T', ' ')}
+                  </div>
+                </div>
+                <div className="flex gap-2 items-center">
+                  <button
+                    onClick={() => resumeInspection(insp)}
+                    className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
+                  >
+                    Continue
+                  </button>
+                  <button
+                    onClick={() => openPdfWindow(insp)}
+                    className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
+                  >
+                    Download PDF
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Completed inspections */}
+          <div className="space-y-2">
+            <h2 className="font-semibold text-sm text-gray-700">Completed inspections</h2>
+            {completed.length === 0 && (
+              <div className="bg-white border rounded-2xl p-4 text-sm text-gray-600">
+                No completed inspections yet.
+              </div>
+            )}
+            {completed.map(insp => (
               <div key={insp.id} className="bg-white border rounded-2xl p-4">
                 <div className="flex justify-between text-sm">
                   <div>
@@ -312,51 +493,71 @@ export default function InspectionsPage() {
                     )}
                   </div>
                 </div>
-                <details className="mt-2 text-xs text-gray-600">
-                  <summary className="cursor-pointer">Show answers</summary>
-                  <ul className="mt-2 space-y-2">
-                    {insp.answers.map((a, i) => (
-                      <li key={i} className="border rounded-xl p-2">
-                        <div className="font-semibold">
-                          {i + 1}. {a.label}
-                        </div>
-                        <div>Answer: {a.answer || '—'}</div>
-                        {a.note && <div>Note: {a.note}</div>}
-                        {a.photos && a.photos.length > 0 && (
-                          <div className="flex flex-wrap gap-2 mt-1">
-                            {a.photos.map((src, idx) => (
-                              <img
-                                key={idx}
-                                src={src}
-                                alt="evidence"
-                                className="h-12 w-12 object-cover rounded-md border"
-                              />
-                            ))}
+                <div className="mt-2 flex justify-between items-center text-xs">
+                  <details className="text-gray-600">
+                    <summary className="cursor-pointer">Show answers</summary>
+                    <ul className="mt-2 space-y-2">
+                      {insp.answers.map((a, i) => (
+                        <li key={i} className="border rounded-xl p-2">
+                          <div className="font-semibold">
+                            {i + 1}. {a.label}
                           </div>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                </details>
+                          <div>Answer: {a.answer || '—'}</div>
+                          {a.note && <div>Note: {a.note}</div>}
+                          {a.photos && a.photos.length > 0 && (
+                            <div className="flex flex-wrap gap-2 mt-1">
+                              {a.photos.map((src, idx) => (
+                                <img
+                                  key={idx}
+                                  src={src}
+                                  alt="evidence"
+                                  className="h-12 w-12 object-cover rounded-md border"
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                  <button
+                    onClick={() => openPdfWindow(insp)}
+                    className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
+                  >
+                    Download PDF
+                  </button>
+                </div>
               </div>
             ))}
           </div>
         </>
       )}
 
+      {/* Active inspection UI */}
       {active && (
         <div className="bg-white border rounded-2xl p-4 space-y-3">
           <div className="flex justify-between items-center">
             <div>
               <h2 className="font-semibold text-royal-700">{active.templateName}</h2>
               {active.site && <div className="text-xs text-gray-500">Site: {active.site}</div>}
+              <div className="text-xs text-gray-500">
+                Started: {active.startedAt.slice(0, 16).replace('T', ' ')}
+              </div>
             </div>
-            <button
-              onClick={() => setActive(null)}
-              className="text-sm px-3 py-1 rounded-xl border hover:bg-gray-50"
-            >
-              Cancel
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={discardInspection}
+                className="text-sm px-3 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
+              >
+                Discard
+              </button>
+              <button
+                onClick={saveInspectionProgress}
+                className="text-sm px-3 py-1 rounded-xl border hover:bg-gray-50"
+              >
+                Save progress
+              </button>
+            </div>
           </div>
 
           <div className="space-y-3">
@@ -402,7 +603,7 @@ export default function InspectionsPage() {
 
           <div className="flex justify-end gap-2">
             <button
-              onClick={saveInspection}
+              onClick={completeInspection}
               className="px-4 py-2 rounded-xl bg-royal-700 text-white text-sm hover:bg-royal-800"
             >
               Complete inspection
