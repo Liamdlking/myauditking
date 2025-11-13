@@ -9,6 +9,10 @@ type Question = {
   options?: string[]
   /** local-only helper to keep what the user is typing, so commas work nicely */
   _optionsText?: string
+  /** guidance text shown to inspectors when they run an inspection */
+  instruction?: string
+  /** reference images shown to inspectors */
+  refImages?: string[]
 }
 
 type Template = {
@@ -16,6 +20,8 @@ type Template = {
   name: string
   description?: string
   site?: string
+  /** logo for this template, shown in list & passed to inspections */
+  logoDataUrl?: string
   questions: Question[]
 }
 
@@ -49,6 +55,8 @@ function normaliseQuestions(raw: any): Question[] {
           .map((s: string) => s.trim())
           .filter(Boolean)
       : undefined,
+    instruction: typeof q.instruction === 'string' ? q.instruction : undefined,
+    refImages: Array.isArray(q.refImages) ? q.refImages : undefined,
   }))
 }
 
@@ -63,6 +71,7 @@ function loadTemplates(): Template[] {
       name: t.name || 'Untitled',
       description: t.description || '',
       site: t.site || '',
+      logoDataUrl: t.logoDataUrl || undefined,
       questions: normaliseQuestions(t.questions),
     }))
   } catch {
@@ -79,6 +88,7 @@ export default function TemplatesPage() {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [site, setSite] = useState('')
+  const [logoDataUrl, setLogoDataUrl] = useState<string | undefined>(undefined)
   const [questions, setQuestions] = useState<Question[]>([])
   const [editingId, setEditingId] = useState<string | null>(null)
 
@@ -94,6 +104,7 @@ export default function TemplatesPage() {
     setName('')
     setDescription('')
     setSite('')
+    setLogoDataUrl(undefined)
     setQuestions([])
     setEditingId(null)
   }
@@ -121,6 +132,55 @@ export default function TemplatesPage() {
     setQuestions(prev => prev.filter(q => q.id !== id))
   }
 
+  const handleLogoUpload = (file: File | null) => {
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setLogoDataUrl(reader.result)
+      }
+    }
+    reader.readAsDataURL(file)
+  }
+
+  const addRefImages = (questionId: string, files: FileList | null) => {
+    if (!files || files.length === 0) return
+    const arr = Array.from(files)
+    const results: string[] = []
+    let remaining = arr.length
+
+    arr.forEach(file => {
+      const reader = new FileReader()
+      reader.onload = () => {
+        if (typeof reader.result === 'string') {
+          results.push(reader.result)
+        }
+        remaining -= 1
+        if (remaining === 0) {
+          setQuestions(prev =>
+            prev.map(q => {
+              if (q.id !== questionId) return q
+              const existing = q.refImages || []
+              return { ...q, refImages: [...existing, ...results] }
+            }),
+          )
+        }
+      }
+      reader.readAsDataURL(file)
+    })
+  }
+
+  const removeRefImage = (questionId: string, index: number) => {
+    setQuestions(prev =>
+      prev.map(q => {
+        if (q.id !== questionId) return q
+        const list = [...(q.refImages || [])]
+        list.splice(index, 1)
+        return { ...q, refImages: list }
+      }),
+    )
+  }
+
   const onSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!name.trim()) return
@@ -138,10 +198,18 @@ export default function TemplatesPage() {
               .map(opt => opt.trim())
               .filter(Boolean)
           : undefined
+      const instruction =
+        typeof q.instruction === 'string' && q.instruction.trim()
+          ? q.instruction.trim()
+          : undefined
+      const refImages = q.refImages && q.refImages.length ? q.refImages : undefined
+
       return {
         ...rest,
         label,
         options,
+        instruction,
+        refImages,
       }
     })
 
@@ -150,6 +218,7 @@ export default function TemplatesPage() {
       name: name.trim(),
       description: description.trim() || '',
       site: site.trim() || '',
+      logoDataUrl,
       questions: cleaned,
     }
 
@@ -168,6 +237,7 @@ export default function TemplatesPage() {
     setName(t.name)
     setDescription(t.description || '')
     setSite(t.site || '')
+    setLogoDataUrl(t.logoDataUrl)
     setQuestions(
       t.questions.map(q => {
         const opts =
@@ -180,6 +250,8 @@ export default function TemplatesPage() {
           ...q,
           options: opts,
           _optionsText: opts.join(', '),
+          refImages: q.refImages || [],
+          instruction: q.instruction || '',
         }
       }),
     )
@@ -195,34 +267,72 @@ export default function TemplatesPage() {
       <div>
         <h1 className="text-2xl font-bold text-royal-700">Templates</h1>
         <p className="text-sm text-gray-600">
-          Build SafetyCulture-style templates with Yes/No/N/A, Good/Fair/Poor, multiple choice and
-          text questions.
+          Build templates with Yes/No/N/A, Good/Fair/Poor, multiple choice and text questions.
+          Add guidance, reference pictures and a logo just like SafetyCulture.
         </p>
       </div>
 
       {/* Template form */}
       <form onSubmit={onSubmit} className="bg-white rounded-2xl border p-4 space-y-4">
-        <div className="grid md:grid-cols-2 gap-3">
-          <input
-            className="border rounded-xl px-3 py-2 text-sm"
-            placeholder="Template name"
-            value={name}
-            onChange={e => setName(e.target.value)}
-            required
-          />
-          <input
-            className="border rounded-xl px-3 py-2 text-sm"
-            placeholder="Site / location (optional)"
-            value={site}
-            onChange={e => setSite(e.target.value)}
-          />
+        <div className="grid md:grid-cols-[minmax(0,1fr)_180px] gap-4 items-start">
+          <div className="space-y-3">
+            <div className="grid md:grid-cols-2 gap-3">
+              <input
+                className="border rounded-xl px-3 py-2 text-sm"
+                placeholder="Template name"
+                value={name}
+                onChange={e => setName(e.target.value)}
+                required
+              />
+              <input
+                className="border rounded-xl px-3 py-2 text-sm"
+                placeholder="Site / location (optional)"
+                value={site}
+                onChange={e => setSite(e.target.value)}
+              />
+            </div>
+            <textarea
+              className="border rounded-xl px-3 py-2 text-sm w-full"
+              placeholder="Description (optional)"
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+            />
+          </div>
+          {/* Template logo */}
+          <div className="space-y-2">
+            <div className="text-xs font-semibold text-gray-700">Template logo</div>
+            <div className="flex items-center gap-3">
+              <div className="w-16 h-16 rounded-xl border bg-gray-50 flex items-center justify-center overflow-hidden text-[10px] text-gray-400">
+                {logoDataUrl ? (
+                  <img
+                    src={logoDataUrl}
+                    alt="Template logo"
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  'Logo'
+                )}
+              </div>
+              <div className="space-y-1">
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={e => handleLogoUpload(e.target.files?.[0] || null)}
+                  className="text-xs"
+                />
+                {logoDataUrl && (
+                  <button
+                    type="button"
+                    onClick={() => setLogoDataUrl(undefined)}
+                    className="text-[11px] text-gray-500 hover:underline"
+                  >
+                    Remove logo
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
-        <textarea
-          className="border rounded-xl px-3 py-2 text-sm w-full"
-          placeholder="Description (optional)"
-          value={description}
-          onChange={e => setDescription(e.target.value)}
-        />
 
         {/* Question builder */}
         <div className="space-y-2">
@@ -326,6 +436,48 @@ export default function TemplatesPage() {
                     />
                   )}
                 </div>
+
+                {/* Inspector instructions */}
+                <textarea
+                  className="border rounded-xl px-3 py-1 text-xs w-full"
+                  placeholder="Inspector instructions (optional) – e.g. what to look for, standards, examples."
+                  value={q.instruction || ''}
+                  onChange={e => updateQuestion(q.id, { instruction: e.target.value })}
+                />
+
+                {/* Reference images */}
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-gray-500">
+                    Reference images (optional) – shown to inspectors while answering
+                  </label>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={e => addRefImages(q.id, e.target.files)}
+                    className="text-xs"
+                  />
+                  {q.refImages && q.refImages.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mt-1">
+                      {q.refImages.map((src, idx) => (
+                        <div key={idx} className="relative">
+                          <img
+                            src={src}
+                            alt="reference"
+                            className="h-12 w-12 object-cover rounded-md border"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => removeRefImage(q.id, idx)}
+                            className="absolute -top-1 -right-1 bg-white/80 rounded-full border text-[9px] px-1 leading-none"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -362,12 +514,27 @@ export default function TemplatesPage() {
             key={t.id}
             className="bg-white border rounded-2xl p-4 flex flex-col md:flex-row justify-between gap-3"
           >
-            <div>
-              <div className="font-semibold text-royal-700">{t.name}</div>
-              {t.site && <div className="text-xs text-gray-500">Site: {t.site}</div>}
-              {t.description && <div className="text-sm text-gray-600 mt-1">{t.description}</div>}
-              <div className="text-xs text-gray-500 mt-1">
-                {t.questions.length} question{t.questions.length === 1 ? '' : 's'}
+            <div className="flex gap-3">
+              <div className="w-10 h-10 rounded-xl border bg-gray-50 flex items-center justify-center overflow-hidden text-[10px] text-gray-400 flex-shrink-0">
+                {t.logoDataUrl ? (
+                  <img
+                    src={t.logoDataUrl}
+                    alt="Template logo"
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  t.name.charAt(0).toUpperCase()
+                )}
+              </div>
+              <div>
+                <div className="font-semibold text-royal-700">{t.name}</div>
+                {t.site && <div className="text-xs text-gray-500">Site: {t.site}</div>}
+                {t.description && (
+                  <div className="text-sm text-gray-600 mt-1">{t.description}</div>
+                )}
+                <div className="text-xs text-gray-500 mt-1">
+                  {t.questions.length} question{t.questions.length === 1 ? '' : 's'}
+                </div>
               </div>
             </div>
             <div className="flex gap-2 items-center">
