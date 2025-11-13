@@ -11,12 +11,19 @@ type Question = {
   refImages?: string[]
 }
 
+type TemplateSection = {
+  id: string
+  title: string
+  headerImageDataUrl?: string
+  questions: Question[]
+}
+
 type Template = {
   id: string
   name: string
   site?: string
   logoDataUrl?: string
-  questions: Question[]
+  sections: TemplateSection[]
 }
 
 type AnswerRow = {
@@ -26,6 +33,9 @@ type AnswerRow = {
   options?: string[]
   instruction?: string
   refImages?: string[]
+  sectionId: string
+  sectionTitle?: string
+  sectionHeaderImageDataUrl?: string
   answer: string
   note?: string
   photos?: string[]
@@ -77,13 +87,40 @@ function loadTemplates(): Template[] {
     if (!raw) return []
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed)) return []
-    return parsed.map((t: any) => ({
-      id: t.id || makeId(),
-      name: t.name || 'Untitled',
-      site: t.site || '',
-      logoDataUrl: t.logoDataUrl || undefined,
-      questions: normaliseQuestions(t.questions),
-    }))
+
+    return parsed.map((t: any) => {
+      if (Array.isArray(t.sections) && t.sections.length > 0) {
+        return {
+          id: t.id || makeId(),
+          name: t.name || 'Untitled',
+          site: t.site || '',
+          logoDataUrl: t.logoDataUrl || undefined,
+          sections: t.sections.map((s: any, idx: number) => ({
+            id: s.id || `sec-${idx + 1}`,
+            title: s.title || `Section ${idx + 1}`,
+            headerImageDataUrl: s.headerImageDataUrl || undefined,
+            questions: normaliseQuestions(s.questions),
+          })),
+        } as Template
+      }
+
+      // fallback: flat questions -> single section
+      const flatQuestions = normaliseQuestions(t.questions)
+      const defaultSection: TemplateSection = {
+        id: makeId(),
+        title: 'General',
+        headerImageDataUrl: undefined,
+        questions: flatQuestions,
+      }
+
+      return {
+        id: t.id || makeId(),
+        name: t.name || 'Untitled',
+        site: t.site || '',
+        logoDataUrl: t.logoDataUrl || undefined,
+        sections: [defaultSection],
+      } as Template
+    })
   } catch {
     return []
   }
@@ -120,17 +157,26 @@ export default function InspectionsPage() {
   }, [inspections])
 
   const startInspection = (tpl: Template) => {
-    const answers: AnswerRow[] = tpl.questions.map(q => ({
-      questionId: q.id,
-      label: q.label,
-      type: q.type,
-      options: q.options,
-      instruction: q.instruction,
-      refImages: q.refImages,
-      answer: '',
-      note: '',
-      photos: [],
-    }))
+    const answers: AnswerRow[] = []
+    tpl.sections.forEach(sec => {
+      sec.questions.forEach(q => {
+        answers.push({
+          questionId: q.id,
+          label: q.label,
+          type: q.type,
+          options: q.options,
+          instruction: q.instruction,
+          refImages: q.refImages,
+          sectionId: sec.id,
+          sectionTitle: sec.title,
+          sectionHeaderImageDataUrl: sec.headerImageDataUrl,
+          answer: '',
+          note: '',
+          photos: [],
+        })
+      })
+    })
+
     const insp: Inspection = {
       id: makeId(),
       templateId: tpl.id,
@@ -315,8 +361,30 @@ export default function InspectionsPage() {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
 
+    let lastSectionId = ''
+
     const rowsHtml = insp.answers
-      .map((a, idx) => {
+      .map(a => {
+        let sectionHeaderHtml = ''
+        if (a.sectionId && a.sectionId !== lastSectionId) {
+          lastSectionId = a.sectionId
+          const headerImg = a.sectionHeaderImageDataUrl
+            ? `<img src="${a.sectionHeaderImageDataUrl}" style="width:40px;height:40px;object-fit:cover;border-radius:8px;border:1px solid #e5e7eb;margin-right:8px;" />`
+            : ''
+          sectionHeaderHtml = `
+            <tr>
+              <td colspan="4" style="padding:10px 8px;border:1px solid #ddd;background:#f9fafb;">
+                <div style="display:flex;align-items:center;gap:8px;">
+                  ${headerImg}
+                  <div style="font-weight:600;font-size:13px;color:#111827;">${escapeHtml(
+                    a.sectionTitle || 'Section',
+                  )}</div>
+                </div>
+              </td>
+            </tr>
+          `
+        }
+
         const refHtml =
           a.refImages && a.refImages.length
             ? `<div style="margin-bottom:4px;font-size:10px;color:#6b7280;">Reference:</div>` +
@@ -337,17 +405,18 @@ export default function InspectionsPage() {
                 )
                 .join('')
             : ''
+        const instructionHtml = a.instruction
+          ? `<div style="margin-top:4px;font-size:11px;color:#6b7280;">${escapeHtml(
+              a.instruction,
+            )}</div>`
+          : ''
+
         return `
+          ${sectionHeaderHtml}
           <tr>
             <td style="padding:8px;border:1px solid #ddd;vertical-align:top;">
-              <strong>${idx + 1}. ${escapeHtml(a.label || '')}</strong>
-              ${
-                a.instruction
-                  ? `<div style="margin-top:4px;font-size:11px;color:#6b7280;">${escapeHtml(
-                      a.instruction,
-                    )}</div>`
-                  : ''
-              }
+              <strong>${escapeHtml(a.label || '')}</strong>
+              ${instructionHtml}
             </td>
             <td style="padding:8px;border:1px solid #ddd;vertical-align:top;">
               ${escapeHtml(a.answer || '—')}
@@ -430,14 +499,33 @@ export default function InspectionsPage() {
     w.focus()
   }
 
+  const groupedBySection = (answers: AnswerRow[]) => {
+    const map: Record<
+      string,
+      { title: string; headerImageDataUrl?: string; rows: AnswerRow[] }
+    > = {}
+    answers.forEach(row => {
+      const id = row.sectionId || 'default'
+      if (!map[id]) {
+        map[id] = {
+          title: row.sectionTitle || 'Section',
+          headerImageDataUrl: row.sectionHeaderImageDataUrl,
+          rows: [],
+        }
+      }
+      map[id].rows.push(row)
+    })
+    return Object.values(map)
+  }
+
   return (
     <div className="max-w-5xl mx-auto py-6 space-y-6">
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
         <div>
           <h1 className="text-2xl font-bold text-royal-700">Inspections</h1>
           <p className="text-sm text-gray-600">
-            Run inspections with reference images and instructions, save in progress, or complete
-            and export as PDF.
+            Run inspections with sections, header images, reference images and instructions. Save
+            in progress, or complete and export as PDF.
           </p>
         </div>
       </div>
@@ -557,52 +645,72 @@ export default function InspectionsPage() {
                 <div className="mt-2 flex justify-between items-center text-xs">
                   <details className="text-gray-600">
                     <summary className="cursor-pointer">Show answers</summary>
-                    <ul className="mt-2 space-y-2">
-                      {insp.answers.map((a, i) => (
-                        <li key={i} className="border rounded-xl p-2">
-                          <div className="font-semibold">
-                            {i + 1}. {a.label}
+                    <div className="mt-2 space-y-3">
+                      {groupedBySection(insp.answers).map((sec, idx) => (
+                        <div key={idx} className="border rounded-xl p-2">
+                          <div className="flex items-center gap-2 mb-2">
+                            {sec.headerImageDataUrl && (
+                              <img
+                                src={sec.headerImageDataUrl}
+                                alt="section"
+                                className="w-8 h-8 rounded-lg object-cover border"
+                              />
+                            )}
+                            <div className="font-semibold text-xs text-gray-800">
+                              {sec.title}
+                            </div>
                           </div>
-                          {a.instruction && (
-                            <div className="text-[11px] text-gray-500 mt-1">
-                              {a.instruction}
-                            </div>
-                          )}
-                          <div>Answer: {a.answer || '—'}</div>
-                          {a.note && <div>Note: {a.note}</div>}
-                          {(a.refImages && a.refImages.length > 0) && (
-                            <div className="mt-1">
-                              <div className="text-[11px] text-gray-500 mb-1">Reference:</div>
-                              <div className="flex flex-wrap gap-2">
-                                {a.refImages.map((src, idx) => (
-                                  <img
-                                    key={idx}
-                                    src={src}
-                                    alt="reference"
-                                    className="h-10 w-10 object-cover rounded-md border"
-                                  />
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                          {a.photos && a.photos.length > 0 && (
-                            <div className="mt-1">
-                              <div className="text-[11px] text-gray-500 mb-1">Evidence:</div>
-                              <div className="flex flex-wrap gap-2">
-                                {a.photos.map((src, idx) => (
-                                  <img
-                                    key={idx}
-                                    src={src}
-                                    alt="evidence"
-                                    className="h-10 w-10 object-cover rounded-md border"
-                                  />
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </li>
+                          <ul className="space-y-2">
+                            {sec.rows.map((a, i) => (
+                              <li key={i} className="border rounded-xl p-2">
+                                <div className="font-semibold">{a.label}</div>
+                                {a.instruction && (
+                                  <div className="text-[11px] text-gray-500 mt-1">
+                                    {a.instruction}
+                                  </div>
+                                )}
+                                <div>Answer: {a.answer || '—'}</div>
+                                {a.note && <div>Note: {a.note}</div>}
+                                {(a.refImages && a.refImages.length > 0) && (
+                                  <div className="mt-1">
+                                    <div className="text-[11px] text-gray-500 mb-1">
+                                      Reference:
+                                    </div>
+                                    <div className="flex flex-wrap gap-2">
+                                      {a.refImages.map((src, idx2) => (
+                                        <img
+                                          key={idx2}
+                                          src={src}
+                                          alt="reference"
+                                          className="h-10 w-10 object-cover rounded-md border"
+                                        />
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                                {a.photos && a.photos.length > 0 && (
+                                  <div className="mt-1">
+                                    <div className="text-[11px] text-gray-500 mb-1">
+                                      Evidence:
+                                    </div>
+                                    <div className="flex flex-wrap gap-2">
+                                      {a.photos.map((src, idx2) => (
+                                        <img
+                                          key={idx2}
+                                          src={src}
+                                          alt="evidence"
+                                          className="h-10 w-10 object-cover rounded-md border"
+                                        />
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
                       ))}
-                    </ul>
+                    </div>
                   </details>
                   <button
                     onClick={() => openPdfWindow(insp)}
@@ -653,58 +761,82 @@ export default function InspectionsPage() {
             </div>
           </div>
 
-          <div className="space-y-3">
-            {active.answers.map((row, index) => (
-              <div key={row.questionId} className="border rounded-xl p-3 text-sm space-y-2">
-                <div className="font-semibold">
-                  {index + 1}. {row.label}
-                </div>
-                {row.instruction && (
-                  <div className="text-[11px] text-gray-500">{row.instruction}</div>
-                )}
-                {row.refImages && row.refImages.length > 0 && (
-                  <div className="flex flex-wrap gap-2 mt-1">
-                    {row.refImages.map((src, idx) => (
-                      <img
-                        key={idx}
-                        src={src}
-                        alt="reference"
-                        className="h-10 w-10 object-cover rounded-md border"
-                      />
-                    ))}
-                  </div>
-                )}
-                {renderAnswerInput(row, index)}
-                <textarea
-                  className="w-full border rounded-xl px-3 py-1 text-xs mt-2"
-                  placeholder="Optional note"
-                  value={row.note || ''}
-                  onChange={e => setAnswer(index, { note: e.target.value })}
-                />
-                <div className="flex flex-col gap-1 mt-2">
-                  <label className="text-xs text-gray-500">
-                    Attach photos (stored in this browser only)
-                  </label>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    onChange={e => handlePhotoChange(index, e.target.files)}
-                    className="text-xs"
-                  />
-                  {row.photos && row.photos.length > 0 && (
-                    <div className="flex flex-wrap gap-2 mt-1">
-                      {row.photos.map((src, idx) => (
-                        <img
-                          key={idx}
-                          src={src}
-                          alt="preview"
-                          className="h-12 w-12 object-cover rounded-md border"
-                        />
-                      ))}
-                    </div>
+          <div className="space-y-4">
+            {groupedBySection(active.answers).map((sec, sIdx) => (
+              <div key={sIdx} className="space-y-2">
+                <div className="flex items-center gap-2">
+                  {sec.headerImageDataUrl && (
+                    <img
+                      src={sec.headerImageDataUrl}
+                      alt="section"
+                      className="w-8 h-8 rounded-lg object-cover border"
+                    />
                   )}
+                  <div className="font-semibold text-sm text-gray-800">{sec.title}</div>
                 </div>
+                {sec.rows.map((row, index) => {
+                  const globalIndex = active.answers.findIndex(
+                    a =>
+                      a.sectionId === row.sectionId &&
+                      a.questionId === row.questionId &&
+                      a.label === row.label,
+                  )
+                  const idxToUse = globalIndex >= 0 ? globalIndex : index
+                  return (
+                    <div
+                      key={row.questionId + '-' + index}
+                      className="border rounded-xl p-3 text-sm space-y-2"
+                    >
+                      <div className="font-semibold">{row.label}</div>
+                      {row.instruction && (
+                        <div className="text-[11px] text-gray-500">{row.instruction}</div>
+                      )}
+                      {row.refImages && row.refImages.length > 0 && (
+                        <div className="flex flex-wrap gap-2 mt-1">
+                          {row.refImages.map((src, idx2) => (
+                            <img
+                              key={idx2}
+                              src={src}
+                              alt="reference"
+                              className="h-10 w-10 object-cover rounded-md border"
+                            />
+                          ))}
+                        </div>
+                      )}
+                      {renderAnswerInput(row, idxToUse)}
+                      <textarea
+                        className="w-full border rounded-xl px-3 py-1 text-xs mt-2"
+                        placeholder="Optional note"
+                        value={row.note || ''}
+                        onChange={e => setAnswer(idxToUse, { note: e.target.value })}
+                      />
+                      <div className="flex flex-col gap-1 mt-2">
+                        <label className="text-xs text-gray-500">
+                          Attach photos (stored in this browser only)
+                        </label>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          multiple
+                          onChange={e => handlePhotoChange(idxToUse, e.target.files)}
+                          className="text-xs"
+                        />
+                        {row.photos && row.photos.length > 0 && (
+                          <div className="flex flex-wrap gap-2 mt-1">
+                            {row.photos.map((src, idx2) => (
+                              <img
+                                key={idx2}
+                                src={src}
+                                alt="preview"
+                                className="h-12 w-12 object-cover rounded-md border"
+                              />
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             ))}
           </div>
