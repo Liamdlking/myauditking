@@ -6,7 +6,9 @@ type Question = {
   id: string
   label: string
   type: QuestionType
-  options?: string[] // for rating/multi
+  options?: string[]
+  /** local-only helper to keep what the user is typing, so commas work nicely */
+  _optionsText?: string
 }
 
 type Template = {
@@ -104,6 +106,7 @@ export default function TemplatesPage() {
     }
     if (type === 'rating') {
       base.options = ['Good', 'Fair', 'Poor']
+      base._optionsText = 'Good, Fair, Poor'
     }
     setQuestions(prev => [...prev, base])
   }
@@ -125,16 +128,22 @@ export default function TemplatesPage() {
       alert('Add at least one question.')
       return
     }
-    const cleaned: Question[] = questions.map(q => ({
-      ...q,
-      label: q.label.trim() || 'Untitled question',
-      options:
+
+    const cleaned: Question[] = questions.map(q => {
+      const { _optionsText, ...rest } = q as any
+      const label = (q.label || '').trim() || 'Untitled question'
+      const options =
         q.type === 'multi' || q.type === 'rating'
           ? (q.options || [])
               .map(opt => opt.trim())
               .filter(Boolean)
-          : undefined,
-    }))
+          : undefined
+      return {
+        ...rest,
+        label,
+        options,
+      }
+    })
 
     const tpl: Template = {
       id: editingId || makeId(),
@@ -160,15 +169,19 @@ export default function TemplatesPage() {
     setDescription(t.description || '')
     setSite(t.site || '')
     setQuestions(
-      t.questions.map(q => ({
-        ...q,
-        options:
+      t.questions.map(q => {
+        const opts =
           q.options && q.options.length
             ? [...q.options]
             : q.type === 'rating'
             ? ['Good', 'Fair', 'Poor']
-            : undefined,
-      })),
+            : []
+        return {
+          ...q,
+          options: opts,
+          _optionsText: opts.join(', '),
+        }
+      }),
     )
   }
 
@@ -291,27 +304,27 @@ export default function TemplatesPage() {
                     <option value="text">Free text</option>
                   </select>
 
-        (q.type === 'multi' || q.type === 'rating') && (
-  <input
-    className="border rounded-xl px-3 py-1 text-xs"
-    placeholder={
-      q.type === 'rating'
-        ? 'Options (comma separated: Good, Fair, Poor)'
-        : 'Options (comma separated)'
-    }
-    value={q._optionsText ?? (q.options || []).join(', ')}
-    onChange={(e) => {
-      const text = e.target.value
-      updateQuestion(q.id, { 
-        _optionsText: text, 
-        options: text
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean),
-      })
-    }}
-  />
-)
+                  {(q.type === 'multi' || q.type === 'rating') && (
+                    <input
+                      className="border rounded-xl px-3 py-1 text-xs"
+                      placeholder={
+                        q.type === 'rating'
+                          ? 'Options (comma separated: Good, Fair, Poor)'
+                          : 'Options (comma separated)'
+                      }
+                      value={q._optionsText ?? (q.options || []).join(', ')}
+                      onChange={e => {
+                        const text = e.target.value
+                        updateQuestion(q.id, {
+                          _optionsText: text,
+                          options: text
+                            .split(',')
+                            .map(s => s.trim())
+                            .filter(Boolean),
+                        })
+                      }}
+                    />
+                  )}
                 </div>
               </div>
             ))}
