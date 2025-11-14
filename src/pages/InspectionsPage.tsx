@@ -291,9 +291,6 @@ export default function InspectionsPage() {
     updateInspectionInList(done)
   }
 
-  const inProgress = inspections.filter(i => !i.completedAt)
-  const completed = inspections.filter(i => i.completedAt)
-
   const renderAnswerInput = (row: AnswerRow, index: number) => {
     if (row.type === 'yesno') {
       const choices = ['Yes', 'No', 'N/A']
@@ -351,7 +348,7 @@ export default function InspectionsPage() {
               key={opt}
               type="button"
               onClick={() => setAnswer(index, { answer: opt })}
-              className={
+              className{
                 'px-3 py-1 rounded-xl border text-xs ' +
                 (row.answer === opt
                   ? 'bg-royal-700 text-white'
@@ -542,6 +539,7 @@ export default function InspectionsPage() {
     return groupBySection(answers)
   }
 
+  // ✅ defined ONCE here (not duplicated anywhere else)
   const inProgress = inspections.filter(i => !i.completedAt)
   const completed = inspections.filter(i => i.completedAt)
 
