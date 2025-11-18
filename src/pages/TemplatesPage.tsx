@@ -1,411 +1,571 @@
-import React, { useEffect, useState } from 'react'
-import { supabase } from '@/utils/supabaseClient'
+import React, { useEffect, useState } from "react";
+import { supabase } from "@/utils/supabaseClient";
 
-// Reuse the same core types
-type QuestionType = 'yesno' | 'rating' | 'multi' | 'text'
+const TPL_KEY = "ak_templates";
+
+// Types used by inspections & template editor
+type QuestionType = "yesno" | "rating" | "multi" | "text";
 
 type Question = {
-  id: string
-  label: string
-  type: QuestionType
-  options?: string[]
-  instruction?: string
-  refImages?: string[]
-}
+  id: string;
+  label: string;
+  type: QuestionType;
+  options?: string[];
+  instruction?: string;
+  refImages?: string[]; // data URLs
+};
 
 type TemplateSection = {
-  id: string
-  title: string
-  headerImageDataUrl?: string
-  questions: Question[]
-}
+  id: string;
+  title: string;
+  headerImageDataUrl?: string;
+  questions: Question[];
+};
 
-type Template = {
-  id: string
-  name: string
-  site?: string
-  logoDataUrl?: string
-  sections: TemplateSection[]
-}
+type TemplateUI = {
+  id: string;
+  name: string;
+  siteId?: string | null;
+  siteName?: string | null;
+  logoDataUrl?: string | null;
+  sections: TemplateSection[];
+  published: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+type Site = {
+  id: string;
+  name: string;
+  code: string | null;
+};
 
 const makeId = () =>
-  (crypto as any)?.randomUUID?.() ?? Math.random().toString(36).slice(2)
+  (crypto as any)?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+
+// Helper to normalise definition JSON from DB
+function normaliseDefinition(def: any): TemplateSection[] {
+  if (!def) {
+    return [
+      {
+        id: makeId(),
+        title: "General",
+        questions: [],
+      },
+    ];
+  }
+
+  if (Array.isArray(def.sections) && def.sections.length > 0) {
+    // Already in sections shape
+    return def.sections.map((sec: any, secIdx: number) => ({
+      id: sec.id || `sec-${secIdx + 1}`,
+      title: sec.title || `Section ${secIdx + 1}`,
+      headerImageDataUrl: sec.headerImageDataUrl || undefined,
+      questions: Array.isArray(sec.questions)
+        ? sec.questions.map((q: any, qIdx: number) => ({
+            id: q.id || `q-${secIdx + 1}-${qIdx + 1}`,
+            label: q.label || "Question",
+            type: (["yesno", "rating", "multi", "text"] as QuestionType[]).includes(
+              q.type
+            )
+              ? (q.type as QuestionType)
+              : "yesno",
+            options: Array.isArray(q.options) ? q.options : undefined,
+            instruction:
+              typeof q.instruction === "string" ? q.instruction : undefined,
+            refImages: Array.isArray(q.refImages) ? q.refImages : undefined,
+          }))
+        : [],
+    }));
+  }
+
+  // Legacy: flat questions array in definition.questions
+  if (Array.isArray(def.questions)) {
+    const questions = def.questions.map((q: any, idx: number) => ({
+      id: q.id || `q-${idx + 1}`,
+      label: q.label || String(q),
+      type: (["yesno", "rating", "multi", "text"] as QuestionType[]).includes(
+        q.type
+      )
+        ? (q.type as QuestionType)
+        : "yesno",
+      options: Array.isArray(q.options) ? q.options : undefined,
+      instruction: typeof q.instruction === "string" ? q.instruction : undefined,
+      refImages: Array.isArray(q.refImages) ? q.refImages : undefined,
+    }));
+
+    return [
+      {
+        id: makeId(),
+        title: "General",
+        questions,
+      },
+    ];
+  }
+
+  // Fallback: empty default section
+  return [
+    {
+      id: makeId(),
+      title: "General",
+      questions: [],
+    },
+  ];
+}
+
+// Save templates to localStorage in a format InspectionsPage expects
+function saveTemplatesToLocalStorage(templates: TemplateUI[]) {
+  try {
+    const payload = templates.map((t) => ({
+      id: t.id,
+      name: t.name,
+      site: t.siteName || null,
+      logoDataUrl: t.logoDataUrl || null,
+      sections: t.sections,
+    }));
+    localStorage.setItem(TPL_KEY, JSON.stringify(payload));
+  } catch (err) {
+    console.error("Failed to save templates to localStorage", err);
+  }
+}
 
 export default function TemplatesPage() {
-  const [templates, setTemplates] = useState<Template[]>([])
-  const [loading, setLoading] = useState(true)
-  const [editing, setEditing] = useState<Template | null>(null)
-  const [showEditor, setShowEditor] = useState(false)
+  const [templates, setTemplates] = useState<TemplateUI[]>([]);
+  const [sites, setSites] = useState<Site[]>([]);
+  const [siteFilter, setSiteFilter] = useState<string>("all");
+  const [search, setSearch] = useState<string>("");
+  const [loading, setLoading] = useState<boolean>(true);
 
-  // Editor state
-  const [name, setName] = useState('')
-  const [site, setSite] = useState('')
-  const [logoDataUrl, setLogoDataUrl] = useState<string | undefined>(undefined)
-  const [sections, setSections] = useState<TemplateSection[]>([])
+  // editor modal
+  const [editing, setEditing] = useState<TemplateUI | null>(null);
+  const [showEditor, setShowEditor] = useState<boolean>(false);
 
-  const resetEditor = () => {
-    setEditing(null)
-    setName('')
-    setSite('')
-    setLogoDataUrl(undefined)
-    setSections([
-      {
-        id: makeId(),
-        title: 'General',
-        headerImageDataUrl: undefined,
-        questions: [],
-      },
-    ])
-  }
+  // ---- Load sites & templates from Supabase ----
 
-  const openNewTemplate = () => {
-    resetEditor()
-    setShowEditor(true)
-  }
+  const loadSites = async () => {
+    const { data, error } = await supabase
+      .from("sites")
+      .select("id, name, code")
+      .order("name", { ascending: true });
 
-  const openExistingTemplate = (tpl: Template) => {
-    setEditing(tpl)
-    setName(tpl.name)
-    setSite(tpl.site || '')
-    setLogoDataUrl(tpl.logoDataUrl)
-    setSections(
-      (tpl.sections || []).map(sec => ({
-        ...sec,
-        questions: (sec.questions || []).map(q => ({ ...q })),
-      })),
-    )
-    setShowEditor(true)
-  }
+    if (!error && data) {
+      setSites(data as Site[]);
+    } else if (error) {
+      console.error("TemplatesPage: loadSites error", error);
+    }
+  };
 
   const loadTemplates = async () => {
-    setLoading(true)
-    try {
-      const { data, error } = await supabase
-        .from('templates')
-        .select('id, name, site, logo_data_url, definition')
-        .order('created_at', { ascending: true })
+    setLoading(true);
+    const { data, error } = await supabase
+      .from("templates")
+      .select(
+        "id, name, site_id, site, logo_data_url, definition, published, created_at, updated_at"
+      )
+      .order("name", { ascending: true });
 
-      if (error) {
-        console.error('load templates error', error)
-        setTemplates([])
-        return
-      }
-
-      const mapped: Template[] =
-        data?.map((row: any) => {
-          const def = row.definition || {}
-          const sectionsRaw = Array.isArray(def.sections) ? def.sections : []
-          let sections: TemplateSection[]
-
-          if (sectionsRaw.length > 0) {
-            sections = sectionsRaw.map((s: any, idx: number) => ({
-              id: s.id || `sec-${idx + 1}`,
-              title: s.title || `Section ${idx + 1}`,
-              headerImageDataUrl: s.headerImageDataUrl || undefined,
-              questions: Array.isArray(s.questions)
-                ? s.questions.map((q: any, qIdx: number) => ({
-                    id: q.id || `q${qIdx + 1}`,
-                    label: q.label || `Question ${qIdx + 1}`,
-                    type: (['yesno', 'rating', 'multi', 'text'] as QuestionType[]).includes(
-                      q.type,
-                    )
-                      ? q.type
-                      : ('yesno' as QuestionType),
-                    options: Array.isArray(q.options) ? q.options : undefined,
-                    instruction:
-                      typeof q.instruction === 'string' ? q.instruction : undefined,
-                    refImages: Array.isArray(q.refImages) ? q.refImages : undefined,
-                  }))
-                : [],
-            }))
-          } else {
-            // Fallback if old definition
-            const flatQs = Array.isArray(def.questions) ? def.questions : []
-            sections = [
-              {
-                id: makeId(),
-                title: 'General',
-                headerImageDataUrl: undefined,
-                questions: flatQs.map((q: any, idx: number) => ({
-                  id: q.id || `q${idx + 1}`,
-                  label: q.label || `Question ${idx + 1}`,
-                  type: (['yesno', 'rating', 'multi', 'text'] as QuestionType[]).includes(
-                    q.type,
-                  )
-                    ? q.type
-                    : ('yesno' as QuestionType),
-                  options: Array.isArray(q.options) ? q.options : undefined,
-                  instruction:
-                    typeof q.instruction === 'string' ? q.instruction : undefined,
-                  refImages: Array.isArray(q.refImages) ? q.refImages : undefined,
-                })),
-              },
-            ]
-          }
-
-          return {
-            id: row.id,
-            name: row.name || 'Untitled',
-            site: row.site || '',
-            logoDataUrl: row.logo_data_url || undefined,
-            sections,
-          } as Template
-        }) || []
-
-      setTemplates(mapped)
-    } catch (err) {
-      console.error('loadTemplates error', err)
-      setTemplates([])
-    } finally {
-      setLoading(false)
+    if (error) {
+      console.error("TemplatesPage: loadTemplates error", error);
+      setTemplates([]);
+      setLoading(false);
+      return;
     }
-  }
+
+    const mapped: TemplateUI[] =
+      (data || []).map((row: any) => ({
+        id: row.id,
+        name: row.name,
+        siteId: row.site_id ?? null,
+        siteName: row.site ?? null,
+        logoDataUrl: row.logo_data_url ?? null,
+        sections: normaliseDefinition(row.definition),
+        published: row.published ?? true,
+        createdAt: row.created_at ?? undefined,
+        updatedAt: row.updated_at ?? undefined,
+      })) ?? [];
+
+    setTemplates(mapped);
+    saveTemplatesToLocalStorage(mapped);
+    setLoading(false);
+  };
 
   useEffect(() => {
-    loadTemplates()
-  }, [])
+    loadSites();
+    loadTemplates();
+  }, []);
 
-  const handleLogoChange = (fileList: FileList | null) => {
-    if (!fileList || fileList.length === 0) return
-    const file = fileList[0]
-    const reader = new FileReader()
+  // ---- Filtering ----
+
+  const filteredTemplates = templates.filter((t) => {
+    const matchesSite =
+      siteFilter === "all" ? true : t.siteId === siteFilter || t.siteId === null;
+    const matchesSearch = t.name
+      .toLowerCase()
+      .includes(search.toLowerCase().trim());
+    return matchesSite && matchesSearch;
+  });
+
+  // ---- Editor logic ----
+
+  const openNewTemplate = () => {
+    const blank: TemplateUI = {
+      id: makeId(),
+      name: "New template",
+      siteId: null,
+      siteName: null,
+      logoDataUrl: undefined,
+      published: false,
+      sections: [
+        {
+          id: makeId(),
+          title: "Section 1",
+          headerImageDataUrl: undefined,
+          questions: [],
+        },
+      ],
+    };
+    setEditing(blank);
+    setShowEditor(true);
+  };
+
+  const openEditTemplate = (tpl: TemplateUI) => {
+    setEditing(tpl);
+    setShowEditor(true);
+  };
+
+  const closeEditor = () => {
+    setShowEditor(false);
+    setEditing(null);
+  };
+
+  const handleLogoChange = (file: File | null) => {
+    if (!editing || !file) return;
+    const reader = new FileReader();
     reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setLogoDataUrl(reader.result)
+      if (typeof reader.result === "string") {
+        setEditing((prev) =>
+          prev ? { ...prev, logoDataUrl: reader.result as string } : prev
+        );
       }
-    }
-    reader.readAsDataURL(file)
-  }
+    };
+    reader.readAsDataURL(file);
+  };
 
-  const handleHeaderImageChange = (secId: string, fileList: FileList | null) => {
-    if (!fileList || fileList.length === 0) return
-    const file = fileList[0]
-    const reader = new FileReader()
+  const handleSectionHeaderImage = (sectionId: string, file: File | null) => {
+    if (!editing || !file) return;
+    const reader = new FileReader();
     reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setSections(prev =>
-          prev.map(sec =>
-            sec.id === secId ? { ...sec, headerImageDataUrl: reader.result as string } : sec,
-          ),
-        )
+      if (typeof reader.result === "string") {
+        setEditing((prev) => {
+          if (!prev) return prev;
+          const sections = prev.sections.map((s) =>
+            s.id === sectionId
+              ? { ...s, headerImageDataUrl: reader.result as string }
+              : s
+          );
+          return { ...prev, sections };
+        });
       }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleAddSection = () => {
+    if (!editing) return;
+    const sec: TemplateSection = {
+      id: makeId(),
+      title: `Section ${editing.sections.length + 1}`,
+      questions: [],
+    };
+    setEditing({ ...editing, sections: [...editing.sections, sec] });
+  };
+
+  const handleRemoveSection = (sectionId: string) => {
+    if (!editing) return;
+    if (editing.sections.length === 1) {
+      alert("You must have at least one section.");
+      return;
     }
-    reader.readAsDataURL(file)
-  }
+    setEditing({
+      ...editing,
+      sections: editing.sections.filter((s) => s.id !== sectionId),
+    });
+  };
 
-  const addSection = () => {
-    setSections(prev => [
-      ...prev,
-      {
-        id: makeId(),
-        title: `Section ${prev.length + 1}`,
-        headerImageDataUrl: undefined,
-        questions: [],
-      },
-    ])
-  }
-
-  const removeSection = (secId: string) => {
-    if (!confirm('Remove this section and its questions?')) return
-    setSections(prev => prev.filter(s => s.id !== secId))
-  }
-
-  const addQuestion = (secId: string, type: QuestionType) => {
-    setSections(prev =>
-      prev.map(sec =>
-        sec.id === secId
-          ? {
-              ...sec,
-              questions: [
-                ...sec.questions,
-                {
-                  id: makeId(),
-                  label: 'New question',
-                  type,
-                  options:
-                    type === 'rating'
-                      ? ['Good', 'Fair', 'Poor']
-                      : type === 'multi'
-                      ? ['Option 1', 'Option 2']
-                      : undefined,
-                },
-              ],
-            }
-          : sec,
+  const handleSectionTitleChange = (sectionId: string, title: string) => {
+    if (!editing) return;
+    setEditing({
+      ...editing,
+      sections: editing.sections.map((s) =>
+        s.id === sectionId ? { ...s, title } : s
       ),
-    )
-  }
+    });
+  };
+
+  const handleAddQuestion = (sectionId: string) => {
+    if (!editing) return;
+    const newQ: Question = {
+      id: makeId(),
+      label: "New question",
+      type: "yesno",
+    };
+    setEditing({
+      ...editing,
+      sections: editing.sections.map((s) =>
+        s.id === sectionId ? { ...s, questions: [...s.questions, newQ] } : s
+      ),
+    });
+  };
+
+  const handleRemoveQuestion = (sectionId: string, questionId: string) => {
+    if (!editing) return;
+    setEditing({
+      ...editing,
+      sections: editing.sections.map((s) =>
+        s.id === sectionId
+          ? {
+              ...s,
+              questions: s.questions.filter((q) => q.id !== questionId),
+            }
+          : s
+      ),
+    });
+  };
 
   const handleQuestionChange = (
-    secId: string,
-    qId: string,
-    patch: Partial<Question>,
+    sectionId: string,
+    questionId: string,
+    patch: Partial<Question>
   ) => {
-    setSections(prev =>
-      prev.map(sec =>
-        sec.id === secId
+    if (!editing) return;
+    setEditing({
+      ...editing,
+      sections: editing.sections.map((s) =>
+        s.id === sectionId
           ? {
-              ...sec,
-              questions: sec.questions.map(q =>
-                q.id === qId
-                  ? {
-                      ...q,
-                      ...patch,
-                      // handle options string specially if passed as any
-                    }
-                  : q,
+              ...s,
+              questions: s.questions.map((q) =>
+                q.id === questionId ? { ...q, ...patch } : q
               ),
             }
-          : sec,
+          : s
       ),
-    )
-  }
+    });
+  };
 
-  const handleQuestionOptionsChange = (
-    secId: string,
-    qId: string,
-    optionsStr: string,
+  const handleRefImageUpload = (
+    sectionId: string,
+    questionId: string,
+    files: FileList | null
   ) => {
-    const arr = optionsStr
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean)
-    handleQuestionChange(secId, qId, { options: arr })
-  }
+    if (!files || files.length === 0 || !editing) return;
+    const arr = Array.from(files);
+    const readers: string[] = [];
+    let remaining = arr.length;
 
-  const removeQuestion = (secId: string, qId: string) => {
-    setSections(prev =>
-      prev.map(sec =>
-        sec.id === secId
-          ? { ...sec, questions: sec.questions.filter(q => q.id !== qId) }
-          : sec,
+    arr.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === "string") {
+          readers.push(reader.result as string);
+        }
+        remaining -= 1;
+        if (remaining === 0) {
+          // all done
+          handleQuestionChange(sectionId, questionId, (prevQ: any) => {
+            const existing =
+              (prevQ && Array.isArray(prevQ.refImages) && prevQ.refImages) ||
+              [];
+            return { refImages: [...existing, ...readers] };
+          } as any);
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  // helper to support functional patch for refImages
+  const functionalQuestionPatch = (
+    sectionId: string,
+    questionId: string,
+    fn: (q: Question) => Partial<Question>
+  ) => {
+    if (!editing) return;
+    setEditing({
+      ...editing,
+      sections: editing.sections.map((s) =>
+        s.id === sectionId
+          ? {
+              ...s,
+              questions: s.questions.map((q) =>
+                q.id === questionId ? { ...q, ...fn(q) } : q
+              ),
+            }
+          : s
       ),
-    )
-  }
+    });
+  };
 
-  const handleQuestionRefImage = (secId: string, qId: string, files: FileList | null) => {
-    if (!files || files.length === 0) return
-    const file = files[0]
-    const reader = new FileReader()
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setSections(prev =>
-          prev.map(sec =>
-            sec.id === secId
-              ? {
-                  ...sec,
-                  questions: sec.questions.map(q =>
-                    q.id === qId
-                      ? {
-                          ...q,
-                          refImages: [...(q.refImages || []), reader.result as string],
-                        }
-                      : q,
-                  ),
-                }
-              : sec,
-          ),
-        )
-      }
-    }
-    reader.readAsDataURL(file)
-  }
+  const handleRefImageFiles = (
+    sectionId: string,
+    questionId: string,
+    files: FileList | null
+  ) => {
+    if (!files || files.length === 0 || !editing) return;
+    const arr = Array.from(files);
+    const readers: string[] = [];
+    let remaining = arr.length;
 
+    arr.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === "string") {
+          readers.push(reader.result as string);
+        }
+        remaining -= 1;
+        if (remaining === 0) {
+          functionalQuestionPatch(sectionId, questionId, (q) => ({
+            refImages: [...(q.refImages ?? []), ...readers],
+          }));
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  // Save template to Supabase + local state + localStorage
   const saveTemplate = async () => {
-    const trimmedName = name.trim()
+    if (!editing) return;
+    const trimmedName = editing.name.trim();
     if (!trimmedName) {
-      alert('Template name is required.')
-      return
+      alert("Template name is required.");
+      return;
     }
 
-    // Build definition JSON
+    // Build definition payload
     const definition = {
-      sections: sections.map(sec => ({
-        id: sec.id,
-        title: sec.title,
-        headerImageDataUrl: sec.headerImageDataUrl || null,
-        questions: sec.questions.map(q => ({
+      sections: editing.sections.map((s) => ({
+        id: s.id,
+        title: s.title,
+        headerImageDataUrl: s.headerImageDataUrl || null,
+        questions: s.questions.map((q) => ({
           id: q.id,
           label: q.label,
           type: q.type,
-          options: q.options || null,
+          options: q.options && q.options.length ? q.options : null,
           instruction: q.instruction || null,
-          refImages: q.refImages || null,
+          refImages: q.refImages && q.refImages.length ? q.refImages : null,
         })),
       })),
+    };
+
+    const chosenSite =
+      editing.siteId && sites.length
+        ? sites.find((s) => s.id === editing.siteId)
+        : undefined;
+
+    const payload = {
+      name: trimmedName,
+      site_id: editing.siteId || null,
+      site: chosenSite ? chosenSite.name : editing.siteName || null,
+      definition,
+      logo_data_url: editing.logoDataUrl || null,
+      published: editing.published,
+      updated_at: new Date().toISOString(),
+    };
+
+    let error;
+    if (templates.find((t) => t.id === editing.id)) {
+      // update
+      const { error: upErr } = await supabase
+        .from("templates")
+        .update(payload)
+        .eq("id", editing.id);
+      error = upErr;
+    } else {
+      // insert
+      const { error: insErr } = await supabase
+        .from("templates")
+        .insert({ id: editing.id, ...payload });
+      error = insErr;
     }
 
-    try {
-      const { data: userData } = await supabase.auth.getUser()
-      const uid = userData?.user?.id ?? null
-
-      if (editing) {
-        const { error } = await supabase
-          .from('templates')
-          .update({
-            name: trimmedName,
-            site: site.trim() || null,
-            logo_data_url: logoDataUrl || null,
-            definition,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', editing.id)
-
-        if (error) {
-          console.error('update template error', error)
-          alert(`Could not save template: ${error.message}`)
-          return
-        }
-      } else {
-        const { error } = await supabase.from('templates').insert({
-          name: trimmedName,
-          site: site.trim() || null,
-          logo_data_url: logoDataUrl || null,
-          definition,
-          created_by: uid,
-        })
-
-        if (error) {
-          console.error('insert template error', error)
-          alert(`Could not create template: ${error.message}`)
-          return
-        }
-      }
-
-      setShowEditor(false)
-      await loadTemplates()
-    } catch (err) {
-      console.error('saveTemplate error', err)
-      alert('Could not save template.')
+    if (error) {
+      console.error("saveTemplate error", error);
+      alert(
+        `Could not save template: ${
+          (error as any)?.message || "Unknown Supabase error"
+        }`
+      );
+      return;
     }
-  }
 
-  const deleteTemplate = async (tpl: Template) => {
-    if (!confirm(`Delete template "${tpl.name}"? This cannot be undone.`)) return
-    try {
-      const { error } = await supabase.from('templates').delete().eq('id', tpl.id)
-      if (error) {
-        console.error('delete template error', error)
-        alert(`Could not delete template: ${error.message}`)
-        return
-      }
-      await loadTemplates()
-    } catch (err) {
-      console.error('deleteTemplate error', err)
-      alert('Could not delete template.')
+    await loadTemplates(); // refresh list & localStorage
+    closeEditor();
+  };
+
+  const togglePublished = async (tpl: TemplateUI) => {
+    const newPublished = !tpl.published;
+    const { error } = await supabase
+      .from("templates")
+      .update({ published: newPublished, updated_at: new Date().toISOString() })
+      .eq("id", tpl.id);
+
+    if (error) {
+      console.error("togglePublished error", error);
+      alert("Could not update published state.");
+      return;
     }
-  }
+
+    const updated = templates.map((t) =>
+      t.id === tpl.id ? { ...t, published: newPublished } : t
+    );
+    setTemplates(updated);
+    saveTemplatesToLocalStorage(updated);
+  };
+
+  const deleteTemplate = async (tpl: TemplateUI) => {
+    if (!window.confirm(`Delete template "${tpl.name}"? This cannot be undone.`)) {
+      return;
+    }
+    const { error } = await supabase.from("templates").delete().eq("id", tpl.id);
+    if (error) {
+      console.error("deleteTemplate error", error);
+      alert("Could not delete template.");
+      return;
+    }
+    const updated = templates.filter((t) => t.id !== tpl.id);
+    setTemplates(updated);
+    saveTemplatesToLocalStorage(updated);
+  };
+
+  // Helper to display site name from id
+  const displaySiteName = (tpl: TemplateUI) => {
+    const s = tpl.siteId ? sites.find((x) => x.id === tpl.siteId) : null;
+    if (s) return s.code ? `${s.name} (${s.code})` : s.name;
+    if (tpl.siteName) return tpl.siteName;
+    return "All sites";
+  };
 
   return (
     <div className="max-w-5xl mx-auto py-6 space-y-6">
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+      {/* Header */}
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-royal-700">Templates</h1>
           <p className="text-sm text-gray-600">
-            Shared inspection templates with sections, images, instructions and logos.
+            Build SafetyCulture-style templates with sections, images and
+            multiple choice questions, and assign them to sites.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-col md:flex-row gap-2 md:items-center">
+          <input
+            type="text"
+            className="border rounded-xl px-3 py-2 text-sm"
+            placeholder="Search templates…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
           <button
             onClick={openNewTemplate}
             className="px-4 py-2 rounded-xl bg-royal-700 text-white text-sm hover:bg-royal-800"
@@ -415,21 +575,40 @@ export default function TemplatesPage() {
         </div>
       </div>
 
-      {loading && <div className="text-sm text-gray-500">Loading templates…</div>}
+      {/* Site filter */}
+      <div className="flex flex-wrap gap-2 items-center">
+        <span className="text-xs text-gray-500">Filter by site:</span>
+        <select
+          value={siteFilter}
+          onChange={(e) => setSiteFilter(e.target.value)}
+          className="border rounded-xl px-3 py-1 text-xs"
+        >
+          <option value="all">All sites</option>
+          {sites.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name} {s.code ? `(${s.code})` : ""}
+            </option>
+          ))}
+        </select>
+        {loading && (
+          <span className="text-xs text-gray-400 ml-2">Loading templates…</span>
+        )}
+      </div>
 
-      {!loading && templates.length === 0 && (
-        <div className="bg-white border rounded-2xl p-4 text-sm text-gray-600">
-          No templates yet. Click <strong>New template</strong> to create one.
-        </div>
-      )}
+      {/* Templates list */}
+      <div className="space-y-2">
+        {filteredTemplates.length === 0 && !loading && (
+          <div className="bg-white border rounded-2xl p-4 text-sm text-gray-600">
+            No templates yet. Create your first template.
+          </div>
+        )}
 
-      <div className="grid gap-4 md:grid-cols-2">
-        {templates.map(tpl => (
+        {filteredTemplates.map((tpl) => (
           <div
             key={tpl.id}
-            className="bg-white border rounded-2xl p-4 flex flex-col justify-between gap-3"
+            className="bg-white border rounded-2xl p-4 flex flex-col md:flex-row justify-between gap-3 text-sm"
           >
-            <div className="flex gap-3">
+            <div className="flex items-start gap-3">
               {tpl.logoDataUrl && (
                 <img
                   src={tpl.logoDataUrl}
@@ -438,26 +617,38 @@ export default function TemplatesPage() {
                 />
               )}
               <div>
-                <div className="font-semibold text-royal-700">{tpl.name}</div>
-                {tpl.site && (
-                  <div className="text-xs text-gray-500">Site: {tpl.site}</div>
-                )}
+                <div className="font-semibold text-gray-900">{tpl.name}</div>
                 <div className="text-xs text-gray-500">
-                  Sections: {tpl.sections.length}, Questions:{' '}
-                  {tpl.sections.reduce((acc, s) => acc + s.questions.length, 0)}
+                  Site: {displaySiteName(tpl)}
                 </div>
+                {tpl.updatedAt && (
+                  <div className="text-[11px] text-gray-400">
+                    Updated: {tpl.updatedAt.slice(0, 16).replace("T", " ")}
+                  </div>
+                )}
               </div>
             </div>
-            <div className="flex justify-between items-center text-xs">
+            <div className="flex flex-wrap gap-2 items-center">
               <button
-                onClick={() => openExistingTemplate(tpl)}
-                className="px-3 py-1 rounded-xl border hover:bg-gray-50"
+                onClick={() => togglePublished(tpl)}
+                className={
+                  "px-3 py-1 rounded-xl border text-xs " +
+                  (tpl.published
+                    ? "bg-emerald-50 border-emerald-300 text-emerald-700"
+                    : "bg-gray-50 border-gray-300 text-gray-600")
+                }
+              >
+                {tpl.published ? "Published" : "Unpublished"}
+              </button>
+              <button
+                onClick={() => openEditTemplate(tpl)}
+                className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
               >
                 Edit
               </button>
               <button
                 onClick={() => deleteTemplate(tpl)}
-                className="px-3 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
+                className="px-3 py-1 rounded-xl border text-xs text-rose-600 hover:bg-rose-50"
               >
                 Delete
               </button>
@@ -467,308 +658,316 @@ export default function TemplatesPage() {
       </div>
 
       {/* Editor modal */}
-      {showEditor && (
-        <div className="fixed inset-0 bg-black/40 grid place-items-center z-50 p-4">
-          <div className="bg-white rounded-2xl max-w-5xl w-full max-h-[90vh] overflow-auto p-4 md:p-6 space-y-4">
-            <div className="flex justify-between items-center">
-              <div className="font-semibold text-lg text-royal-700">
-                {editing ? 'Edit template' : 'New template'}
-              </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setShowEditor(false)}
-                  className="px-3 py-1 text-sm rounded-xl border hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={saveTemplate}
-                  className="px-3 py-1 text-sm rounded-xl bg-royal-700 text-white hover:bg-royal-800"
-                >
-                  Save
-                </button>
-              </div>
+      {showEditor && editing && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-auto p-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="font-semibold text-royal-700 text-sm">
+                {templates.find((t) => t.id === editing.id)
+                  ? "Edit template"
+                  : "New template"}
+              </h2>
+              <button
+                onClick={closeEditor}
+                className="text-xs text-gray-500 hover:underline"
+              >
+                Close
+              </button>
             </div>
 
             {/* Basic info */}
-            <div className="bg-gray-50 rounded-2xl p-4 space-y-3">
-              <div className="grid md:grid-cols-3 gap-3">
-                <div className="md:col-span-2">
-                  <label className="text-xs text-gray-600">Template name</label>
+            <div className="grid md:grid-cols-3 gap-3">
+              <div className="md:col-span-2 space-y-2">
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">
+                    Template name
+                  </label>
                   <input
-                    value={name}
-                    onChange={e => setName(e.target.value)}
                     className="w-full border rounded-xl px-3 py-2 text-sm"
-                    placeholder="e.g. Warehouse Daily Safety Walk"
+                    value={editing.name}
+                    onChange={(e) =>
+                      setEditing({ ...editing, name: e.target.value })
+                    }
                   />
                 </div>
                 <div>
-                  <label className="text-xs text-gray-600">Site (optional)</label>
-                  <input
-                    value={site}
-                    onChange={e => setSite(e.target.value)}
+                  <label className="block text-xs text-gray-500 mb-1">
+                    Site
+                  </label>
+                  <select
                     className="w-full border rounded-xl px-3 py-2 text-sm"
-                    placeholder="e.g. Manchester DC"
+                    value={editing.siteId || ""}
+                    onChange={(e) =>
+                      setEditing({
+                        ...editing,
+                        siteId: e.target.value || null,
+                      })
+                    }
+                  >
+                    <option value="">(No site / global)</option>
+                    {sites.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} {s.code ? `(${s.code})` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="tpl-published"
+                    type="checkbox"
+                    checked={editing.published}
+                    onChange={(e) =>
+                      setEditing({ ...editing, published: e.target.checked })
+                    }
                   />
+                  <label
+                    htmlFor="tpl-published"
+                    className="text-xs text-gray-600"
+                  >
+                    Published (visible to inspectors)
+                  </label>
                 </div>
               </div>
-              <div className="flex flex-col md:flex-row items-start md:items-center gap-3">
+              <div className="space-y-2">
                 <div>
-                  <label className="text-xs text-gray-600">Template logo</label>
-                  <div className="flex items-center gap-3 mt-1">
-                    {logoDataUrl && (
-                      <img
-                        src={logoDataUrl}
-                        alt="logo"
-                        className="w-10 h-10 rounded-full object-cover border"
-                      />
-                    )}
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={e => handleLogoChange(e.target.files)}
-                      className="text-xs"
+                  <label className="block text-xs text-gray-500 mb-1">
+                    Template logo
+                  </label>
+                  {editing.logoDataUrl && (
+                    <img
+                      src={editing.logoDataUrl}
+                      alt="logo preview"
+                      className="w-16 h-16 rounded-full object-cover border mb-2"
                     />
-                  </div>
+                  )}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) =>
+                      handleLogoChange(e.target.files?.[0] ?? null)
+                    }
+                    className="text-xs"
+                  />
                 </div>
-                <p className="text-xs text-gray-500">
-                  Logo helps users quickly identify this template on mobile/desktop.
-                </p>
               </div>
             </div>
 
-            {/* Sections + questions */}
+            {/* Sections */}
             <div className="space-y-3">
-              <div className="flex justify-between items-center">
-                <div className="font-semibold text-sm text-gray-800">
-                  Sections &amp; questions
-                </div>
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold text-sm text-gray-800">
+                  Sections & questions
+                </h3>
                 <button
                   type="button"
-                  onClick={addSection}
-                  className="px-3 py-1 text-xs rounded-xl border hover:bg-gray-50"
+                  onClick={handleAddSection}
+                  className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
                 >
                   Add section
                 </button>
               </div>
 
-              <div className="space-y-3">
-                {sections.map(sec => (
-                  <div key={sec.id} className="border rounded-2xl p-3 space-y-3 bg-white">
-                    <div className="flex justify-between items-start gap-3">
-                      <div className="flex-1 space-y-1">
-                        <label className="text-xs text-gray-600">Section title</label>
-                        <input
-                          value={sec.title}
-                          onChange={e =>
-                            setSections(prev =>
-                              prev.map(s =>
-                                s.id === sec.id ? { ...s, title: e.target.value } : s,
-                              ),
-                            )
-                          }
-                          className="w-full border rounded-xl px-3 py-1 text-sm"
-                          placeholder="e.g. PPE, Fire Safety, Housekeeping"
-                        />
-                      </div>
-                      <div className="flex flex-col items-end gap-1">
-                        <label className="text-xs text-gray-600">Header image</label>
-                        <div className="flex items-center gap-2">
-                          {sec.headerImageDataUrl && (
-                            <img
-                              src={sec.headerImageDataUrl}
-                              alt="header"
-                              className="w-10 h-10 rounded-lg object-cover border"
-                            />
-                          )}
-                          <input
-                            type="file"
-                            accept="image/*"
-                            onChange={e =>
-                              handleHeaderImageChange(sec.id, e.target.files)
-                            }
-                            className="text-xs"
-                          />
-                        </div>
-                        {sections.length > 1 && (
-                          <button
-                            type="button"
-                            onClick={() => removeSection(sec.id)}
-                            className="text-[11px] text-rose-600 hover:underline mt-1"
-                          >
-                            Remove section
-                          </button>
-                        )}
-                      </div>
+              {editing.sections.map((sec) => (
+                <div
+                  key={sec.id}
+                  className="border rounded-2xl p-3 space-y-3 bg-gray-50"
+                >
+                  <div className="flex flex-col md:flex-row gap-3 md:items-center md:justify-between">
+                    <div className="flex-1 space-y-1">
+                      <label className="block text-xs text-gray-500 mb-1">
+                        Section title
+                      </label>
+                      <input
+                        className="w-full border rounded-xl px-3 py-2 text-sm"
+                        value={sec.title}
+                        onChange={(e) =>
+                          handleSectionTitleChange(sec.id, e.target.value)
+                        }
+                      />
                     </div>
+                    <div className="space-y-1">
+                      <label className="block text-xs text-gray-500 mb-1">
+                        Header image
+                      </label>
+                      {sec.headerImageDataUrl && (
+                        <img
+                          src={sec.headerImageDataUrl}
+                          alt="section header"
+                          className="w-16 h-16 rounded-lg object-cover border mb-1"
+                        />
+                      )}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) =>
+                          handleSectionHeaderImage(
+                            sec.id,
+                            e.target.files?.[0] ?? null
+                          )
+                        }
+                        className="text-xs"
+                      />
+                    </div>
+                    <div className="flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveSection(sec.id)}
+                        className="text-xs text-rose-600 hover:underline"
+                      >
+                        Remove section
+                      </button>
+                    </div>
+                  </div>
 
-                    {/* Questions in section */}
-                    <div className="space-y-2">
-                      {sec.questions.map(q => (
-                        <div
-                          key={q.id}
-                          className="border rounded-xl p-2 text-xs md:text-sm space-y-2"
-                        >
-                          <div className="flex flex-col md:flex-row gap-2">
-                            <div className="flex-1">
-                              <label className="text-[11px] text-gray-600">
-                                Question text
-                              </label>
-                              <input
-                                value={q.label}
-                                onChange={e =>
-                                  handleQuestionChange(sec.id, q.id, {
-                                    label: e.target.value,
-                                  })
-                                }
-                                className="w-full border rounded-xl px-2 py-1 text-xs md:text-sm"
-                                placeholder="e.g. Are walkways clear of obstructions?"
-                              />
-                            </div>
-                            <div className="w-full md:w-40">
-                              <label className="text-[11px] text-gray-600">
-                                Answer type
-                              </label>
-                              <select
-                                value={q.type}
-                                onChange={e =>
-                                  handleQuestionChange(sec.id, q.id, {
-                                    type: e.target.value as QuestionType,
-                                  })
-                                }
-                                className="w-full border rounded-xl px-2 py-1 text-xs"
-                              >
-                                <option value="yesno">Yes / No / N/A</option>
-                                <option value="rating">Rating (Good/Fair/Poor)</option>
-                                <option value="multi">Multiple choice</option>
-                                <option value="text">Text only</option>
-                              </select>
-                            </div>
-                          </div>
-
-                          {(q.type === 'rating' || q.type === 'multi') && (
-                            <div>
-                              <label className="text-[11px] text-gray-600">
-                                Options (comma separated)
-                              </label>
-                              <input
-                                value={(q.options || []).join(', ')}
-                                onChange={e =>
-                                  handleQuestionOptionsChange(
-                                    sec.id,
-                                    q.id,
-                                    e.target.value,
-                                  )
-                                }
-                                className="w-full border rounded-xl px-2 py-1 text-xs"
-                                placeholder={
-                                  q.type === 'rating'
-                                    ? 'e.g. Good, Fair, Poor'
-                                    : 'e.g. Red, Amber, Green'
-                                }
-                              />
-                            </div>
-                          )}
-
-                          <div>
-                            <label className="text-[11px] text-gray-600">
-                              Inspector instructions (optional)
-                            </label>
-                            <textarea
-                              value={q.instruction || ''}
-                              onChange={e =>
+                  <div className="space-y-2">
+                    {sec.questions.map((q) => (
+                      <div
+                        key={q.id}
+                        className="bg-white border rounded-xl p-3 space-y-2"
+                      >
+                        <div className="flex flex-col md:flex-row gap-2 md:items-center md:justify-between">
+                          <input
+                            className="flex-1 border rounded-xl px-3 py-2 text-sm"
+                            value={q.label}
+                            onChange={(e) =>
+                              handleQuestionChange(sec.id, q.id, {
+                                label: e.target.value,
+                              })
+                            }
+                          />
+                          <div className="flex gap-2 items-center">
+                            <select
+                              className="border rounded-xl px-2 py-1 text-xs"
+                              value={q.type}
+                              onChange={(e) =>
                                 handleQuestionChange(sec.id, q.id, {
-                                  instruction: e.target.value,
+                                  type: e.target.value as QuestionType,
                                 })
                               }
-                              className="w-full border rounded-xl px-2 py-1 text-xs"
-                              placeholder="Explain what to look for, acceptable standards, etc."
-                            />
-                          </div>
-
-                          <div className="flex flex-col md:flex-row gap-2 md:items-center">
-                            <div>
-                              <label className="text-[11px] text-gray-600">
-                                Reference image (optional)
-                              </label>
-                              <input
-                                type="file"
-                                accept="image/*"
-                                onChange={e =>
-                                  handleQuestionRefImage(sec.id, q.id, e.target.files)
-                                }
-                                className="text-xs"
-                              />
-                            </div>
-                            {q.refImages && q.refImages.length > 0 && (
-                              <div className="flex flex-wrap gap-2 mt-1">
-                                {q.refImages.map((src, idx) => (
-                                  <img
-                                    key={idx}
-                                    src={src}
-                                    alt="reference"
-                                    className="h-10 w-10 object-cover rounded-md border"
-                                  />
-                                ))}
-                              </div>
-                            )}
-                          </div>
-
-                          <div className="flex justify-end">
+                            >
+                              <option value="yesno">Yes / No / N/A</option>
+                              <option value="rating">Good / Fair / Poor</option>
+                              <option value="multi">Multiple choice</option>
+                              <option value="text">Text only</option>
+                            </select>
                             <button
                               type="button"
-                              onClick={() => removeQuestion(sec.id, q.id)}
-                              className="text-[11px] text-rose-600 hover:underline"
+                              onClick={() =>
+                                handleRemoveQuestion(sec.id, q.id)
+                              }
+                              className="text-xs text-rose-600 hover:underline"
                             >
-                              Remove question
+                              Remove
                             </button>
                           </div>
                         </div>
-                      ))}
 
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          onClick={() => addQuestion(sec.id, 'yesno')}
-                          className="px-2 py-1 rounded-xl border text-[11px] hover:bg-gray-50"
-                        >
-                          + Yes/No/N/A
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => addQuestion(sec.id, 'rating')}
-                          className="px-2 py-1 rounded-xl border text-[11px] hover:bg-gray-50"
-                        >
-                          + Rating
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => addQuestion(sec.id, 'multi')}
-                          className="px-2 py-1 rounded-xl border text-[11px] hover:bg-gray-50"
-                        >
-                          + Multiple choice
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => addQuestion(sec.id, 'text')}
-                          className="px-2 py-1 rounded-xl border text-[11px] hover:bg-gray-50"
-                        >
-                          + Text
-                        </button>
+                        {(q.type === "rating" || q.type === "multi") && (
+                          <div>
+                            <label className="block text-xs text-gray-500 mb-1">
+                              Options (comma-separated)
+                            </label>
+                            <input
+                              className="w-full border rounded-xl px-3 py-1 text-xs"
+                              value={q.options?.join(", ") || ""}
+                              onChange={(e) =>
+                                handleQuestionChange(sec.id, q.id, {
+                                  options: e.target.value
+                                    .split(",")
+                                    .map((s) => s.trim())
+                                    .filter(Boolean),
+                                })
+                              }
+                              placeholder={
+                                q.type === "rating"
+                                  ? "e.g. Good, Fair, Poor"
+                                  : "e.g. Option A, Option B, Option C"
+                              }
+                            />
+                          </div>
+                        )}
+
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">
+                            Inspector guidance / instruction
+                          </label>
+                          <textarea
+                            className="w-full border rounded-xl px-3 py-2 text-xs"
+                            value={q.instruction || ""}
+                            onChange={(e) =>
+                              handleQuestionChange(sec.id, q.id, {
+                                instruction: e.target.value,
+                              })
+                            }
+                            placeholder="Optional guidance for the inspector (shown under the question)."
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="block text-xs text-gray-500 mb-1">
+                            Reference images
+                          </label>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            multiple
+                            onChange={(e) =>
+                              handleRefImageFiles(
+                                sec.id,
+                                q.id,
+                                e.target.files
+                              )
+                            }
+                            className="text-xs"
+                          />
+                          {q.refImages && q.refImages.length > 0 && (
+                            <div className="flex flex-wrap gap-2 mt-1">
+                              {q.refImages.map((src, idx) => (
+                                <img
+                                  key={idx}
+                                  src={src}
+                                  alt="ref"
+                                  className="h-10 w-10 object-cover rounded-md border"
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                    ))}
 
-              <p className="text-[11px] text-gray-500">
-                Inspectors will see sections with headers, reference images, and the answer
-                widgets you’ve configured — similar to SafetyCulture.
-              </p>
+                    <button
+                      type="button"
+                      onClick={() => handleAddQuestion(sec.id)}
+                      className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
+                    >
+                      Add question
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeEditor}
+                className="px-4 py-2 rounded-xl border text-sm hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveTemplate}
+                className="px-4 py-2 rounded-xl bg-royal-700 text-white text-sm hover:bg-royal-800"
+              >
+                Save template
+              </button>
             </div>
           </div>
         </div>
       )}
     </div>
-  )
+  );
 }
