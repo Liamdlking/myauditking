@@ -1,1098 +1,371 @@
-import React, { useCallback, useEffect, useState } from 'react'
-import { supabase } from '@/utils/supabaseClient'
+import React, { useEffect, useState } from "react";
+import { supabase } from "@/utils/supabaseClient";
+import jsPDF from "jspdf";
 
-// ---------- Types shared with TemplatesPage ----------
-
-type QuestionType = 'yesno' | 'rating' | 'multi' | 'text'
-
-type Question = {
-  id: string
-  label: string
-  type: QuestionType
-  options?: string[]
-  instruction?: string
-  refImages?: string[]
-}
-
-type TemplateSection = {
-  id: string
-  title: string
-  headerImageDataUrl?: string
-  questions: Question[]
-}
-
-type Template = {
-  id: string
-  name: string
-  site?: string
-  logoDataUrl?: string
-  sections: TemplateSection[]
-}
-
-type AnswerRow = {
-  dbId: string           // inspection_answers.id in Supabase
-  questionId: string
-  label: string
-  type: QuestionType
-  options?: string[]
-  instruction?: string
-  refImages?: string[]
-  sectionId: string
-  sectionTitle?: string
-  sectionHeaderImageDataUrl?: string
-  answer: string
-  note?: string
-  photos?: string[]      // maps to evidence_images[]
-}
-
-type Inspection = {
-  id: string             // inspections.id
-  templateName: string
-  site?: string
-  logoUrl?: string
-  status: 'in_progress' | 'completed'
-  startedAt: string
-  completedAt?: string
-  answers: AnswerRow[]
-}
-
-// ---------- Helpers for decoding templates from Supabase ----------
-
-const makeId = () =>
-  (crypto as any)?.randomUUID?.() ?? Math.random().toString(36).slice(2)
-
-function normaliseQuestions(raw: any): Question[] {
-  if (!Array.isArray(raw) || raw.length === 0) return []
-  if (typeof raw[0] === 'string') {
-    return raw.map((label: string) => ({
-      id: makeId(),
-      label,
-      type: 'yesno' as QuestionType,
-    }))
-  }
-  return raw.map((q: any, idx: number) => ({
-    id: q.id || `q${idx + 1}`,
-    label: q.label || String(q),
-    type: (['yesno', 'rating', 'multi', 'text'] as QuestionType[]).includes(q.type)
-      ? q.type
-      : ('yesno' as QuestionType),
-    options: Array.isArray(q.options) ? q.options : undefined,
-    instruction: typeof q.instruction === 'string' ? q.instruction : undefined,
-    refImages: Array.isArray(q.refImages) ? q.refImages : undefined,
-  }))
-}
-
-function templateFromRow(row: any): Template {
-  const def = row.definition || {}
-  const sectionsRaw = Array.isArray(def.sections) ? def.sections : []
-
-  let sections: TemplateSection[]
-
-  if (sectionsRaw.length > 0) {
-    sections = sectionsRaw.map((s: any, idx: number) => ({
-      id: s.id || `sec-${idx + 1}`,
-      title: s.title || `Section ${idx + 1}`,
-      headerImageDataUrl: s.headerImageDataUrl || undefined,
-      questions: normaliseQuestions(s.questions),
-    }))
-  } else {
-    const flatQuestions = normaliseQuestions(def.questions)
-    sections = [
-      {
-        id: makeId(),
-        title: 'General',
-        headerImageDataUrl: undefined,
-        questions: flatQuestions,
-      },
-    ]
-  }
-
-  return {
-    id: row.id,
-    name: row.name || 'Untitled',
-    site: row.site || '',
-    logoDataUrl: row.logo_data_url || undefined,
-    sections,
-  }
-}
-
-// Group answers by section for UI + PDF
-function groupBySection(answers: AnswerRow[]) {
-  const map: Record<
-    string,
-    { title: string; headerImageDataUrl?: string; rows: AnswerRow[] }
-  > = {}
-
-  answers.forEach(row => {
-    const id = row.sectionId || 'default'
-    if (!map[id]) {
-      map[id] = {
-        title: row.sectionTitle || 'Section',
-        headerImageDataUrl: row.sectionHeaderImageDataUrl,
-        rows: [],
-      }
-    }
-    map[id].rows.push(row)
-  })
-
-  return Object.values(map)
-}
+type InspectionRow = {
+  id: string;
+  template_id: string | null;
+  template_name: string;
+  site: string | null;
+  status: string;
+  started_at: string | null;
+  submitted_at: string | null;
+  score: number | null;
+  items: any; // JSONB from Supabase
+  owner_name?: string | null;
+};
 
 export default function InspectionsPage() {
-  const [templates, setTemplates] = useState<Template[]>([])
-  const [inspections, setInspections] = useState<Inspection[]>([])
-  const [active, setActive] = useState<Inspection | null>(null)
-  const [userId, setUserId] = useState<string | null>(null)
-  const [loading, setLoading] = useState<boolean>(true)
+  const [inspections, setInspections] = useState<InspectionRow[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Get current Supabase user id (so we only run when logged in)
-  useEffect(() => {
-    const run = async () => {
-      const { data, error } = await supabase.auth.getUser()
-      if (error) {
-        console.error('auth.getUser error', error)
-      }
-      setUserId(data?.user?.id ?? null)
-    }
-    run()
-  }, [])
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [downloading, setDownloading] = useState<boolean>(false);
 
-  // Load templates from Supabase (shared across all users)
-  const loadTemplatesFromSupabase = useCallback(async () => {
+  // ----------------------
+  // Load inspections
+  // ----------------------
+  const loadInspections = async () => {
+    setLoading(true);
+    setError(null);
     try {
-      const { data, error } = await supabase
-        .from('templates')
-        .select('id, name, site, logo_data_url, definition')
-        .order('created_at', { ascending: true })
-
-      if (error) {
-        console.error('load templates error', error)
-        setTemplates([])
-        return
-      }
-
-      const mapped: Template[] = (data || []).map(templateFromRow)
-      setTemplates(mapped)
-    } catch (err) {
-      console.error('loadTemplatesFromSupabase error', err)
-      setTemplates([])
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!userId) return
-    loadTemplatesFromSupabase()
-  }, [userId, loadTemplatesFromSupabase])
-
-  // Load ALL inspections from Supabase (shared between all users)
-  const loadInspectionsFromSupabase = useCallback(async () => {
-    if (!userId) {
-      setLoading(false)
-      return
-    }
-    setLoading(true)
-    try {
-      const { data, error } = await supabase
-        .from('inspections')
+      const { data, error: err } = await supabase
+        .from("inspections")
         .select(
-          `
-          id,
-          template_name,
-          site,
-          logo_url,
-          status,
-          started_at,
-          completed_at,
-          inspection_answers (
-            id,
-            question_id,
-            label,
-            type,
-            options,
-            instruction,
-            ref_images,
-            section_id,
-            section_title,
-            section_header_image_url,
-            answer,
-            note,
-            evidence_images
-          )
-        `,
+          "id, template_id, template_name, site, status, started_at, submitted_at, score, items, owner_name"
         )
-        .order('started_at', { ascending: false })
+        .order("started_at", { ascending: false });
 
-      if (error) {
-        console.error('load inspections error', error)
-        setInspections([])
-        return
-      }
+      if (err) throw err;
 
-      const mapped: Inspection[] =
-        data?.map((row: any) => {
-          const answers: AnswerRow[] = (row.inspection_answers || []).map((a: any) => ({
-            dbId: a.id,
-            questionId: a.question_id,
-            label: a.label,
-            type: (a.type || 'yesno') as QuestionType,
-            options: a.options || undefined,
-            instruction: a.instruction || undefined,
-            refImages: a.ref_images || undefined,
-            sectionId: a.section_id || 'default',
-            sectionTitle: a.section_title || 'Section',
-            sectionHeaderImageDataUrl: a.section_header_image_url || undefined,
-            answer: a.answer || '',
-            note: a.note || '',
-            photos: a.evidence_images || [],
-          }))
-
-          return {
-            id: row.id,
-            templateName: row.template_name,
-            site: row.site || undefined,
-            logoUrl: row.logo_url || undefined,
-            status: (row.status || 'in_progress') as 'in_progress' | 'completed',
-            startedAt: row.started_at,
-            completedAt: row.completed_at || undefined,
-            answers,
-          } as Inspection
-        }) || []
-
-      setInspections(mapped)
-
-      // Refresh active inspection if it's open
-      if (active) {
-        const refreshed = mapped.find(i => i.id === active.id)
-        if (refreshed) setActive(refreshed)
-      }
+      setInspections((data || []) as InspectionRow[]);
+      setSelectedIds([]); // reset selection each load
+    } catch (e: any) {
+      console.error("loadInspections error", e);
+      setError(
+        e?.message || "Could not load inspections. Check Supabase settings."
+      );
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }, [active, userId])
+  };
 
   useEffect(() => {
-    if (!userId) return
-    loadInspectionsFromSupabase()
-  }, [userId, loadInspectionsFromSupabase])
+    loadInspections();
+  }, []);
 
-  // Realtime: any change to inspections / inspection_answers triggers reload
-  useEffect(() => {
-    if (!userId) return
-    const channel = supabase
-      .channel('inspections-sync')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'inspections' },
-        () => loadInspectionsFromSupabase(),
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'inspection_answers' },
-        () => loadInspectionsFromSupabase(),
-      )
-      .subscribe()
+  // ----------------------
+  // Selection logic
+  // ----------------------
+  const toggleSelectOne = (id: string, checked: boolean) => {
+    setSelectedIds((prev) =>
+      checked ? [...prev, id] : prev.filter((x) => x !== id)
+    );
+  };
 
-    return () => {
-      supabase.removeChannel(channel)
+  const toggleSelectAll = (checked: boolean) => {
+    if (checked) {
+      setSelectedIds(inspections.map((i) => i.id));
+    } else {
+      setSelectedIds([]);
     }
-  }, [userId, loadInspectionsFromSupabase])
+  };
 
-  // ---------- Actions ----------
+  const allSelected =
+    inspections.length > 0 && selectedIds.length === inspections.length;
 
-  const startInspection = async (tpl: Template) => {
-    if (!userId) {
-      alert('You must be logged in to start an inspection.')
-      return
+  // ----------------------
+  // PDF generation
+  // ----------------------
+  const downloadSelectedAsPdf = async () => {
+    if (selectedIds.length === 0) {
+      alert("Select at least one inspection first.");
+      return;
     }
+
+    setDownloading(true);
     try {
-      // 1) create inspection row
-      const { data: inspRow, error: inspErr } = await supabase
-        .from('inspections')
-        .insert({
-          template_name: tpl.name,
-          site: tpl.site ?? null,
-          logo_url: tpl.logoDataUrl ?? null,
-          owner_user_id: userId, // still recorded, but not used for filtering
-          status: 'in_progress',
-        })
-        .select('*')
-        .single()
-
-      if (inspErr || !inspRow) {
-        console.error('startInspection: insert inspections error', inspErr)
-        alert(
-          `Could not start inspection (inspections): ${
-            inspErr?.message ?? 'Unknown error'
-          }`,
-        )
-        return
+      const selected = inspections.filter((i) => selectedIds.includes(i.id));
+      if (selected.length === 0) {
+        alert("No inspections matched selection.");
+        return;
       }
 
-      // 2) create answers rows
-      const answerPayload: any[] = []
-      ;(tpl.sections || []).forEach(sec => {
-        ;(sec.questions || []).forEach(q => {
-          answerPayload.push({
-            inspection_id: inspRow.id,
-            question_id: q.id,
-            label: q.label,
-            type: q.type,
-            options: q.options || null,
-            instruction: q.instruction || null,
-            ref_images: q.refImages || null,
-            section_id: sec.id,
-            section_title: sec.title,
-            section_header_image_url: sec.headerImageDataUrl || null,
-            answer: '',
-            note: '',
-            evidence_images: [],
-          })
-        })
-      })
+      const doc = new jsPDF({
+        orientation: "p",
+        unit: "mm",
+        format: "a4",
+      });
 
-      const { data: ansRows, error: ansErr } = await supabase
-        .from('inspection_answers')
-        .insert(answerPayload)
-        .select('*')
-
-      if (ansErr) {
-        console.error('startInspection: insert answers error', ansErr)
-        alert(
-          `Could not start inspection (answers): ${
-            ansErr?.message ?? 'Unknown error'
-          }`,
-        )
-        return
-      }
-
-      const answers: AnswerRow[] =
-        ansRows?.map((a: any) => ({
-          dbId: a.id,
-          questionId: a.question_id,
-          label: a.label,
-          type: (a.type || 'yesno') as QuestionType,
-          options: a.options || undefined,
-          instruction: a.instruction || undefined,
-          refImages: a.ref_images || undefined,
-          sectionId: a.section_id || 'default',
-          sectionTitle: a.section_title || 'Section',
-          sectionHeaderImageDataUrl: a.section_header_image_url || undefined,
-          answer: a.answer || '',
-          note: a.note || '',
-          photos: a.evidence_images || [],
-        })) || []
-
-      const insp: Inspection = {
-        id: inspRow.id,
-        templateName: inspRow.template_name,
-        site: inspRow.site || undefined,
-        logoUrl: inspRow.logo_url || undefined,
-        status: (inspRow.status || 'in_progress') as 'in_progress' | 'completed',
-        startedAt: inspRow.started_at,
-        completedAt: inspRow.completed_at || undefined,
-        answers,
-      }
-
-      setInspections(prev => [insp, ...prev])
-      setActive(insp)
-    } catch (err) {
-      console.error('startInspection error', err)
-      alert('Could not start inspection.')
-    }
-  }
-
-  const resumeInspection = (insp: Inspection) => {
-    setActive(insp)
-  }
-
-  const setAnswer = async (rowIndex: number, patch: Partial<AnswerRow>) => {
-    if (!active) return
-    const answers = [...active.answers]
-    const target = answers[rowIndex]
-    if (!target) return
-
-    const updatedRow: AnswerRow = { ...target, ...patch }
-    answers[rowIndex] = updatedRow
-
-    setActive({ ...active, answers })
-
-    // Update DB
-    try {
-      const payload: any = {}
-      if (patch.answer !== undefined) payload.answer = patch.answer
-      if (patch.note !== undefined) payload.note = patch.note
-      if (patch.photos !== undefined) payload.evidence_images = patch.photos
-
-      if (Object.keys(payload).length > 0) {
-        await supabase
-          .from('inspection_answers')
-          .update(payload)
-          .eq('id', target.dbId)
-      }
-    } catch (err) {
-      console.error('setAnswer db update error', err)
-    }
-  }
-
-  const handlePhotoChange = (rowIndex: number, files: FileList | null) => {
-    if (!files || files.length === 0 || !active) return
-    const fileArray = Array.from(files)
-    const readersDone: string[] = []
-    let remaining = fileArray.length
-
-    fileArray.forEach(file => {
-      const reader = new FileReader()
-      reader.onload = () => {
-        if (typeof reader.result === 'string') {
-          readersDone.push(reader.result)
-        }
-        remaining -= 1
-        if (remaining === 0) {
-          const existing = active.answers[rowIndex]?.photos || []
-          const merged = [...existing, ...readersDone]
-          setAnswer(rowIndex, { photos: merged })
-        }
-      }
-      reader.readAsDataURL(file)
-    })
-  }
-
-  const discardInspection = async () => {
-    if (!active) return
-    if (!confirm('Discard this inspection? This cannot be undone.')) return
-    try {
-      await supabase.from('inspections').delete().eq('id', active.id)
-      setInspections(prev => prev.filter(i => i.id !== active.id))
-      setActive(null)
-    } catch (err) {
-      console.error('discardInspection error', err)
-    }
-  }
-
-  const saveInspectionProgress = () => {
-    // Nothing extra: changes already synced answer-by-answer
-    setActive(null)
-  }
-
-  const completeInspection = async () => {
-    if (!active) return
-    try {
-      const now = new Date().toISOString()
-      await supabase
-        .from('inspections')
-        .update({ status: 'completed', completed_at: now })
-        .eq('id', active.id)
-
-      const updated: Inspection = { ...active, status: 'completed', completedAt: now }
-      setActive(updated)
-      setInspections(prev => prev.map(i => (i.id === updated.id ? updated : i)))
-    } catch (err) {
-      console.error('completeInspection error', err)
-      alert('Could not complete inspection.')
-    }
-  }
-
-  const renderAnswerInput = (row: AnswerRow, index: number) => {
-    if (row.type === 'yesno') {
-      const choices = ['Yes', 'No', 'N/A']
-      return (
-        <div className="flex flex-wrap gap-2">
-          {choices.map(choice => (
-            <button
-              key={choice}
-              type="button"
-              onClick={() => setAnswer(index, { answer: choice })}
-              className={
-                'px-3 py-1 rounded-xl border text-xs ' +
-                (row.answer === choice
-                  ? 'bg-royal-700 text-white'
-                  : 'bg-white hover:bg-gray-50')
-              }
-            >
-              {choice}
-            </button>
-          ))}
-        </div>
-      )
-    }
-
-    if (row.type === 'rating') {
-      const options =
-        row.options && row.options.length ? row.options : ['Good', 'Fair', 'Poor']
-      return (
-        <div className="flex flex-wrap gap-2">
-          {options.map(opt => (
-            <button
-              key={opt}
-              type="button"
-              onClick={() => setAnswer(index, { answer: opt })}
-              className={
-                'px-3 py-1 rounded-xl border text-xs ' +
-                (row.answer === opt
-                  ? 'bg-royal-700 text-white'
-                  : 'bg-white hover:bg-gray-50')
-              }
-            >
-              {opt}
-            </button>
-          ))}
-        </div>
-      )
-    }
-
-    if (row.type === 'multi') {
-      const options = row.options || []
-      return (
-        <div className="flex flex-wrap gap-2">
-          {options.map(opt => (
-            <button
-              key={opt}
-              type="button"
-              onClick={() => setAnswer(index, { answer: opt })}
-              className={
-                'px-3 py-1 rounded-xl border text-xs ' +
-                (row.answer === opt
-                  ? 'bg-royal-700 text-white'
-                  : 'bg-white hover:bg-gray-50')
-              }
-            >
-              {opt}
-            </button>
-          ))}
-          {options.length === 0 && (
-            <span className="text-xs text-gray-400">
-              No options defined for this question.
-            </span>
-          )}
-        </div>
-      )
-    }
-
-    // Free text
-    return (
-      <textarea
-        className="w-full border rounded-xl px-3 py-1 text-sm"
-        placeholder="Enter answer..."
-        value={row.answer}
-        onChange={e => setAnswer(index, { answer: e.target.value })}
-      />
-    )
-  }
-
-  const openPdfWindow = (insp: Inspection) => {
-    const w = window.open('', '_blank', 'width=900,height=1000')
-    if (!w) {
-      alert('Popup blocked. Please allow popups for this site to download the PDF.')
-      return
-    }
-
-    const started = new Date(insp.startedAt).toLocaleString()
-    const completed = insp.completedAt
-      ? new Date(insp.completedAt).toLocaleString()
-      : '—'
-
-    const escapeHtml = (str: string) =>
-      str
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-
-    let lastSectionId = ''
-
-    const rowsHtml = (insp.answers || [])
-      .map(a => {
-        let sectionHeaderHtml = ''
-        if (a.sectionId && a.sectionId !== lastSectionId) {
-          lastSectionId = a.sectionId
-          const headerImg = a.sectionHeaderImageDataUrl
-            ? `<img src="${a.sectionHeaderImageDataUrl}" style="width:40px;height:40px;object-fit:cover;border-radius:8px;border:1px solid #e5e7eb;margin-right:8px;" />`
-            : ''
-          sectionHeaderHtml = `
-            <tr>
-              <td colspan="4" style="padding:10px 8px;border:1px solid #ddd;background:#f9fafb;">
-                <div style="display:flex;align-items:center;gap:8px;">
-                  ${headerImg}
-                  <div style="font-weight:600;font-size:13px;color:#111827;">${escapeHtml(
-                    a.sectionTitle || 'Section',
-                  )}</div>
-                </div>
-              </td>
-            </tr>
-          `
+      selected.forEach((insp, index) => {
+        if (index > 0) {
+          doc.addPage();
         }
 
-        const refHtml =
-          a.refImages && a.refImages.length
-            ? `<div style="margin-bottom:4px;font-size:10px;color:#6b7280;">Reference:</div>` +
-              a.refImages
-                .map(
-                  src =>
-                    `<img src="${src}" style="width:56px;height:56px;object-fit:cover;border-radius:4px;border:1px solid #ddd;margin-right:4px;margin-top:2px;" />`,
-                )
-                .join('')
-            : ''
-        const photosHtml =
-          a.photos && a.photos.length
-            ? `<div style="margin-top:6px;margin-bottom:2px;font-size:10px;color:#6b7280;">Evidence:</div>` +
-              a.photos
-                .map(
-                  src =>
-                    `<img src="${src}" style="width:64px;height:64px;object-fit:cover;border-radius:4px;border:1px solid #ddd;margin-right:4px;margin-top:2px;" />`,
-                )
-                .join('')
-            : ''
-        const instructionHtml = a.instruction
-          ? `<div style="margin-top:4px;font-size:11px;color:#6b7280;">${escapeHtml(
-              a.instruction,
-            )}</div>`
-          : ''
+        let y = 15;
 
-        return `
-          ${sectionHeaderHtml}
-          <tr>
-            <td style="padding:8px;border:1px solid #ddd;vertical-align:top;">
-              <strong>${escapeHtml(a.label || '')}</strong>
-              ${instructionHtml}
-            </td>
-            <td style="padding:8px;border:1px solid #ddd;vertical-align:top;">
-              ${escapeHtml(a.answer || '—')}
-            </td>
-            <td style="padding:8px;border:1px solid #ddd;vertical-align:top;">
-              ${a.note ? escapeHtml(a.note) : ''}
-            </td>
-            <td style="padding:8px;border:1px solid #ddd;vertical-align:top;">
-              ${refHtml}${photosHtml}
-            </td>
-          </tr>
-        `
-      })
-      .join('')
+        // Header
+        doc.setFontSize(16);
+        doc.text("Audit King - Inspection Report", 10, y);
+        y += 8;
 
-    const logoHtml = insp.logoUrl
-      ? `<img src="${insp.logoUrl}" style="width:32px;height:32px;border-radius:999px;object-fit:cover;border:1px solid #e5e7eb;" />`
-      : `<div style="width:32px;height:32px;border-radius:999px;background:linear-gradient(135deg,#3730a3,#facc15);"></div>`
+        doc.setFontSize(12);
+        doc.text(`Template: ${insp.template_name || "-"}`, 10, y);
+        y += 6;
 
-    const html = `
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <meta charset="utf-8" />
-          <title>Audit King Report</title>
-        </head>
-        <body style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding:24px; background:#ffffff; color:#111827;">
-          <header style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;">
-            <div style="display:flex;align-items:center;gap:8px;">
-              ${logoHtml}
-              <div style="font-weight:800;font-size:18px;color:#312e81;">
-                Audit <span style="color:#facc15;">King</span>
-              </div>
-            </div>
-            <div style="font-size:12px;color:#6b7280;">Inspection report</div>
-          </header>
+        doc.text(`Site: ${insp.site || "-"}`, 10, y);
+        y += 6;
 
-          <h1 style="font-size:20px;font-weight:700;color:#111827;margin-bottom:4px;">
-            ${escapeHtml(insp.templateName || '')}
-          </h1>
-          <p style="font-size:13px;color:#4b5563;margin:0 0 16px 0;">
-            Site: <strong>${escapeHtml(insp.site || '—')}</strong>
-          </p>
+        const started =
+          insp.started_at?.replace("T", " ").slice(0, 16) || "—";
+        const submitted =
+          insp.submitted_at?.replace("T", " ").slice(0, 16) || "—";
 
-          <div style="font-size:12px;color:#4b5563;margin-bottom:16px;">
-            <div>Started: <strong>${started}</strong></div>
-            <div>Completed: <strong>${completed}</strong></div>
-          </div>
+        doc.text(`Started: ${started}`, 10, y);
+        y += 6;
 
-          <table style="width:100%;border-collapse:collapse;font-size:12px;">
-            <thead>
-              <tr>
-                <th style="text-align:left;padding:8px;border:1px solid #ddd;background:#f3f4f6;">Question</th>
-                <th style="text-align:left;padding:8px;border:1px solid #ddd;background:#f3f4f6;">Answer</th>
-                <th style="text-align:left;padding:8px;border:1px solid #ddd;background:#f3f4f6;">Note</th>
-                <th style="text-align:left;padding:8px;border:1px solid #ddd;background:#f3f4f6;">Images</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${rowsHtml}
-            </tbody>
-          </table>
+        doc.text(`Submitted: ${submitted}`, 10, y);
+        y += 6;
 
-          <p style="font-size:11px;color:#9ca3af;margin-top:24px;">
-            Generated by Audit King. Use your browser's "Save as PDF" option when printing.
-          </p>
+        doc.text(
+          `Score: ${insp.score !== null && insp.score !== undefined ? `${insp.score}%` : "--"}`,
+          10,
+          y
+        );
+        y += 6;
 
-          <script>
-            window.onload = function () {
-              window.print();
-            };
-          </script>
-        </body>
-      </html>
-    `
+        if (insp.owner_name) {
+          doc.text(`Inspector: ${insp.owner_name}`, 10, y);
+          y += 8;
+        } else {
+          y += 4;
+        }
 
-    w.document.open()
-    w.document.write(html)
-    w.document.close()
-    w.focus()
-  }
+        // Divider
+        doc.line(10, y, 200, y);
+        y += 8;
 
-  const groupedBySection = (answers: AnswerRow[] | undefined) => {
-    if (!answers || !answers.length) return []
-    return groupBySection(answers)
-  }
+        // Items
+        doc.setFontSize(11);
+        const items = (insp.items || []) as any[];
 
-  const inProgress = inspections.filter(i => i.status === 'in_progress')
-  const completed = inspections.filter(i => i.status === 'completed')
+        if (!items || items.length === 0) {
+          doc.text("No item details recorded.", 10, y);
+          return;
+        }
 
-  // ---------- Render ----------
+        items.forEach((item: any, idx: number) => {
+          // New page if we're near the bottom
+          if (y > 270) {
+            doc.addPage();
+            y = 15;
+          }
 
+          const label = item.label || `Item ${idx + 1}`;
+          const type = item.type || "";
+          const pass = item.pass;
+          const value = item.value;
+          const note = item.note || item.notes;
+
+          // Main line
+          let statusText = "";
+          if (type === "yesno") {
+            if (pass === true) statusText = "Pass";
+            else if (pass === false) statusText = "Fail";
+            else statusText = "N/A";
+          } else if (
+            type === "choice" ||
+            type === "multi" ||
+            type === "multiple"
+          ) {
+            statusText = value ? String(value) : "";
+          } else if (
+            type === "text" ||
+            type === "number" ||
+            type === "date"
+          ) {
+            statusText = value ? String(value) : "";
+          }
+
+          doc.setFont(undefined, "bold");
+          doc.text(`${idx + 1}. ${label}`, 10, y);
+          y += 5;
+
+          doc.setFont(undefined, "normal");
+          if (statusText) {
+            doc.text(`Answer: ${statusText}`, 12, y);
+            y += 5;
+          }
+
+          if (note) {
+            const noteLines = doc.splitTextToSize(
+              `Notes: ${String(note)}`,
+              180
+            );
+            noteLines.forEach((line: string) => {
+              if (y > 270) {
+                doc.addPage();
+                y = 15;
+              }
+              doc.text(line, 12, y);
+              y += 4;
+            });
+          }
+
+          // Small gap before next item
+          y += 3;
+        });
+      });
+
+      const filename =
+        selected.length === 1
+          ? `inspection-${selected[0].id}.pdf`
+          : `inspections-${new Date().toISOString().slice(0, 10)}.pdf`;
+
+      doc.save(filename);
+    } catch (e: any) {
+      console.error("downloadSelectedAsPdf error", e);
+      alert(
+        e?.message ||
+          "Could not generate PDF. Try with fewer inspections selected."
+      );
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  // ----------------------
+  // Render
+  // ----------------------
   return (
-    <div className="max-w-5xl mx-auto py-6 space-y-6">
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+    <div className="max-w-6xl mx-auto py-6 space-y-4">
+      <div className="flex items-center justify-between gap-2">
         <div>
-          <h1 className="text-2xl font-bold text-royal-700">Inspections</h1>
+          <h1 className="text-2xl font-bold text-purple-700">Inspections</h1>
           <p className="text-sm text-gray-600">
-            Shared inspections with sections, images, notes and PDF export (Supabase).
+            View completed and in-progress inspections. Select multiple rows to
+            download a combined PDF.
           </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={loadInspections}
+            className="px-3 py-2 rounded-xl border text-xs hover:bg-gray-50"
+          >
+            Refresh
+          </button>
+          <button
+            onClick={downloadSelectedAsPdf}
+            disabled={selectedIds.length === 0 || downloading}
+            className={`px-3 py-2 rounded-xl text-xs font-medium ${
+              selectedIds.length === 0 || downloading
+                ? "bg-gray-200 text-gray-500 cursor-not-allowed"
+                : "bg-purple-700 text-white hover:bg-purple-800"
+            }`}
+          >
+            {downloading
+              ? "Generating PDF…"
+              : `Download selected (${selectedIds.length})`}
+          </button>
         </div>
       </div>
 
-      {loading && <div className="text-sm text-gray-500">Loading inspections…</div>}
-
-      {/* No active inspection: lists */}
-      {!active && (
-        <>
-          {/* Start new */}
-          <div className="bg-white border rounded-2xl p-4">
-            <h2 className="font-semibold mb-2 text-royal-700">Start new inspection</h2>
-            {templates.length === 0 && (
-              <p className="text-sm text-gray-600">
-                No templates available. Create one on the Templates page first.
-              </p>
-            )}
-            <div className="flex flex-wrap gap-2 mt-2">
-              {templates.map(t => (
-                <button
-                  key={t.id}
-                  onClick={() => startInspection(t)}
-                  className="px-3 py-2 rounded-xl border text-sm bg-white hover:bg-gray-50 flex items-center gap-2"
-                >
-                  {t.logoDataUrl && (
-                    <img
-                      src={t.logoDataUrl}
-                      alt="logo"
-                      className="w-5 h-5 rounded-full object-cover border"
-                    />
-                  )}
-                  <span>
-                    {t.name}
-                    {t.site ? ` — ${t.site}` : ''}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* In-progress inspections */}
-          <div className="space-y-2">
-            <h2 className="font-semibold text-sm text-gray-700">In-progress inspections</h2>
-            {inProgress.length === 0 && (
-              <div className="bg-white border rounded-2xl p-4 text-sm text-gray-600">
-                No in-progress inspections.
-              </div>
-            )}
-            {inProgress.map(insp => (
-              <div
-                key={insp.id}
-                className="bg-white border rounded-2xl p-4 flex flex-col md:flex-row justify-between gap-3 text-sm"
-              >
-                <div className="flex items-start gap-2">
-                  {insp.logoUrl && (
-                    <img
-                      src={insp.logoUrl}
-                      alt="logo"
-                      className="w-8 h-8 rounded-full object-cover border"
-                    />
-                  )}
-                  <div>
-                    <div className="font-semibold text-royal-700">{insp.templateName}</div>
-                    {insp.site && <div className="text-xs text-gray-500">Site: {insp.site}</div>}
-                    <div className="text-xs text-gray-500">
-                      Started: {insp.startedAt.slice(0, 16).replace('T', ' ')}
-                    </div>
-                  </div>
-                </div>
-                <div className="flex gap-2 items-center">
-                  <button
-                    onClick={() => resumeInspection(insp)}
-                    className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
-                  >
-                    Continue
-                  </button>
-                  <button
-                    onClick={() => openPdfWindow(insp)}
-                    className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
-                  >
-                    Download PDF
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {/* Completed inspections */}
-          <div className="space-y-2">
-            <h2 className="font-semibold text-sm text-gray-700">Completed inspections</h2>
-            {completed.length === 0 && (
-              <div className="bg-white border rounded-2xl p-4 text-sm text-gray-600">
-                No completed inspections yet.
-              </div>
-            )}
-            {completed.map(insp => (
-              <div key={insp.id} className="bg-white border rounded-2xl p-4">
-                <div className="flex justify-between text-sm">
-                  <div className="flex items-start gap-2">
-                    {insp.logoUrl && (
-                      <img
-                        src={insp.logoUrl}
-                        alt="logo"
-                        className="w-8 h-8 rounded-full object-cover border"
-                      />
-                    )}
-                    <div>
-                      <div className="font-semibold text-royal-700">{insp.templateName}</div>
-                      {insp.site && <div className="text-xs text-gray-500">Site: {insp.site}</div>}
-                    </div>
-                  </div>
-                  <div className="text-xs text-gray-500 text-right">
-                    <div>Started: {insp.startedAt.slice(0, 16).replace('T', ' ')}</div>
-                    {insp.completedAt && (
-                      <div>Completed: {insp.completedAt.slice(0, 16).replace('T', ' ')}</div>
-                    )}
-                  </div>
-                </div>
-                <div className="mt-2 flex justify-between items-center text-xs">
-                  <details className="text-gray-600">
-                    <summary className="cursor-pointer">Show answers</summary>
-                    <div className="mt-2 space-y-3">
-                      {groupedBySection(insp.answers).map((sec, idx) => (
-                        <div key={idx} className="border rounded-xl p-2">
-                          <div className="flex items-center gap-2 mb-2">
-                            {sec.headerImageDataUrl && (
-                              <img
-                                src={sec.headerImageDataUrl}
-                                alt="section"
-                                className="w-8 h-8 rounded-lg object-cover border"
-                              />
-                            )}
-                            <div className="font-semibold text-xs text-gray-800">
-                              {sec.title}
-                            </div>
-                          </div>
-                          <ul className="space-y-2">
-                            {sec.rows.map((a, i) => (
-                              <li key={i} className="border rounded-xl p-2">
-                                <div className="font-semibold">{a.label}</div>
-                                {a.instruction && (
-                                  <div className="text-[11px] text-gray-500 mt-1">
-                                    {a.instruction}
-                                  </div>
-                                )}
-                                <div>Answer: {a.answer || '—'}</div>
-                                {a.note && <div>Note: {a.note}</div>}
-                                {a.refImages && a.refImages.length > 0 && (
-                                  <div className="mt-1">
-                                    <div className="text-[11px] text-gray-500 mb-1">
-                                      Reference:
-                                    </div>
-                                    <div className="flex flex-wrap gap-2">
-                                      {a.refImages.map((src, idx2) => (
-                                        <img
-                                          key={idx2}
-                                          src={src}
-                                          alt="reference"
-                                          className="h-10 w-10 object-cover rounded-md border"
-                                        />
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                                {a.photos && a.photos.length > 0 && (
-                                  <div className="mt-1">
-                                    <div className="text-[11px] text-gray-500 mb-1">
-                                      Evidence:
-                                    </div>
-                                    <div className="flex flex-wrap gap-2">
-                                      {a.photos.map((src, idx2) => (
-                                        <img
-                                          key={idx2}
-                                          src={src}
-                                          alt="evidence"
-                                          className="h-10 w-10 object-cover rounded-md border"
-                                        />
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                  <button
-                    onClick={() => openPdfWindow(insp)}
-                    className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
-                  >
-                    Download PDF
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </>
+      {error && (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
+          {error}
+        </div>
       )}
 
-      {/* Active inspection UI */}
-      {active && (
-        <div className="bg-white border rounded-2xl p-4 space-y-3">
-          <div className="flex justify-between items-center">
-            <div className="flex items-start gap-2">
-              {active.logoUrl && (
-                <img
-                  src={active.logoUrl}
-                  alt="logo"
-                  className="w-8 h-8 rounded-full object-cover border"
-                />
-              )}
-              <div>
-                <h2 className="font-semibold text-royal-700">{active.templateName}</h2>
-                {active.site && (
-                  <div className="text-xs text-gray-500">Site: {active.site}</div>
-                )}
-                <div className="text-xs text-gray-500">
-                  Started: {active.startedAt.slice(0, 16).replace('T', ' ')}
-                </div>
-              </div>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={discardInspection}
-                className="text-sm px-3 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
-              >
-                Discard
-              </button>
-              <button
-                onClick={saveInspectionProgress}
-                className="text-sm px-3 py-1 rounded-xl border hover:bg-gray-50"
-              >
-                Save progress
-              </button>
-            </div>
-          </div>
+      {loading ? (
+        <div className="rounded-xl border bg-white p-4 text-sm text-gray-600">
+          Loading inspections…
+        </div>
+      ) : inspections.length === 0 ? (
+        <div className="rounded-xl border bg-white p-4 text-sm text-gray-600">
+          No inspections yet.
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-2xl border bg-white">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="bg-gray-50 text-gray-600">
+                <th className="px-3 py-2 text-left">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={(e) => toggleSelectAll(e.target.checked)}
+                  />
+                </th>
+                <th className="px-3 py-2 text-left">Template</th>
+                <th className="px-3 py-2 text-left">Site</th>
+                <th className="px-3 py-2 text-left">Status</th>
+                <th className="px-3 py-2 text-left">Started</th>
+                <th className="px-3 py-2 text-left">Submitted</th>
+                <th className="px-3 py-2 text-left">Score</th>
+                <th className="px-3 py-2 text-left">Inspector</th>
+              </tr>
+            </thead>
+            <tbody>
+              {inspections.map((insp) => {
+                const started =
+                  insp.started_at?.replace("T", " ").slice(0, 16) || "—";
+                const submitted =
+                  insp.submitted_at?.replace("T", " ").slice(0, 16) || "—";
+                const selected = selectedIds.includes(insp.id);
 
-          {!active.answers || active.answers.length === 0 ? (
-            <div className="text-sm text-gray-600 border rounded-xl p-3">
-              This inspection has no questions. Check the template configuration.
-            </div>
-          ) : (
-            <div className="space-y-4">
-              {groupedBySection(active.answers).map((sec, sIdx) => (
-                <div key={sIdx} className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    {sec.headerImageDataUrl && (
-                      <img
-                        src={sec.headerImageDataUrl}
-                        alt="section"
-                        className="w-8 h-8 rounded-lg object-cover border"
+                return (
+                  <tr
+                    key={insp.id}
+                    className={selected ? "bg-purple-50" : "hover:bg-gray-50"}
+                  >
+                    <td className="px-3 py-2 align-middle">
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={(e) =>
+                          toggleSelectOne(insp.id, e.target.checked)
+                        }
                       />
-                    )}
-                    <div className="font-semibold text-sm text-gray-800">
-                      {sec.title}
-                    </div>
-                  </div>
-                  {sec.rows.map((row, localIdx) => {
-                    const globalIndex = active.answers.findIndex(
-                      a =>
-                        a.sectionId === row.sectionId &&
-                        a.questionId === row.questionId &&
-                        a.label === row.label,
-                    )
-                    const idxToUse = globalIndex >= 0 ? globalIndex : localIdx
-                    const actualRow = active.answers[idxToUse] || row
-
-                    return (
-                      <div
-                        key={row.questionId + '-' + localIdx}
-                        className="border rounded-xl p-3 text-sm space-y-2"
+                    </td>
+                    <td className="px-3 py-2 align-middle font-medium text-gray-900">
+                      {insp.template_name}
+                    </td>
+                    <td className="px-3 py-2 align-middle text-gray-700">
+                      {insp.site || "—"}
+                    </td>
+                    <td className="px-3 py-2 align-middle">
+                      <span
+                        className={`px-2 py-1 rounded-full text-xs ${
+                          insp.status === "submitted"
+                            ? "bg-emerald-50 text-emerald-700"
+                            : "bg-amber-50 text-amber-700"
+                        }`}
                       >
-                        <div className="font-semibold">{actualRow.label}</div>
-                        {actualRow.instruction && (
-                          <div className="text-[11px] text-gray-500">
-                            {actualRow.instruction}
-                          </div>
-                        )}
-                        {actualRow.refImages && actualRow.refImages.length > 0 && (
-                          <div className="flex flex-wrap gap-2 mt-1">
-                            {actualRow.refImages.map((src, idx2) => (
-                              <img
-                                key={idx2}
-                                src={src}
-                                alt="reference"
-                                className="h-10 w-10 object-cover rounded-md border"
-                              />
-                            ))}
-                          </div>
-                        )}
-                        {renderAnswerInput(actualRow, idxToUse)}
-                        <textarea
-                          className="w-full border rounded-xl px-3 py-1 text-xs mt-2"
-                          placeholder="Optional note"
-                          value={actualRow.note || ''}
-                          onChange={e => setAnswer(idxToUse, { note: e.target.value })}
-                        />
-                        <div className="flex flex-col gap-1 mt-2">
-                          <label className="text-xs text-gray-500">
-                            Attach photos (stored in Supabase as data URLs)
-                          </label>
-                          <input
-                            type="file"
-                            accept="image/*"
-                            multiple
-                            onChange={e => handlePhotoChange(idxToUse, e.target.files)}
-                            className="text-xs"
-                          />
-                          {actualRow.photos && actualRow.photos.length > 0 && (
-                            <div className="flex flex-wrap gap-2 mt-1">
-                              {actualRow.photos.map((src, idx2) => (
-                                <img
-                                  key={idx2}
-                                  src={src}
-                                  alt="preview"
-                                  className="h-12 w-12 object-cover rounded-md border"
-                                />
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div className="flex justify-end gap-2">
-            <button
-              onClick={completeInspection}
-              className="px-4 py-2 rounded-xl bg-royal-700 text-white text-sm hover:bg-royal-800"
-            >
-              Complete inspection
-            </button>
-          </div>
+                        {insp.status}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 align-middle text-gray-700">
+                      {started}
+                    </td>
+                    <td className="px-3 py-2 align-middle text-gray-700">
+                      {submitted}
+                    </td>
+                    <td className="px-3 py-2 align-middle text-gray-900">
+                      {insp.score !== null && insp.score !== undefined
+                        ? `${insp.score}%`
+                        : "—"}
+                    </td>
+                    <td className="px-3 py-2 align-middle text-gray-700">
+                      {insp.owner_name || "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
-  )
+  );
 }
