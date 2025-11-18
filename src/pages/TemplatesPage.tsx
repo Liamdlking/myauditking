@@ -301,4 +301,4 @@ export default function TemplatesPage() {
   const addQuestionToSection = (sectionId: string) => {
     setFormSections((prev) =>
       prev.map((s) =>
-        s.id === 
+        s.id ===
