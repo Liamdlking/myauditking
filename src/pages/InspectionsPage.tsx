@@ -321,7 +321,11 @@ export default function InspectionsPage() {
 
       if (inspErr || !inspRow) {
         console.error('startInspection: insert inspections error', inspErr)
-        alert('Could not start inspection (inspections).')
+        alert(
+          `Could not start inspection (inspections): ${
+            inspErr?.message ?? 'Unknown error'
+          }`,
+        )
         return
       }
 
@@ -354,7 +358,11 @@ export default function InspectionsPage() {
 
       if (ansErr) {
         console.error('startInspection: insert answers error', ansErr)
-        alert('Could not start inspection (answers).')
+        alert(
+          `Could not start inspection (answers): ${
+            ansErr?.message ?? 'Unknown error'
+          }`,
+        )
         return
       }
 
