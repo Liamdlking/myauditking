@@ -88,6 +88,40 @@ export default function InspectionsPage() {
   };
 
   // ---------------------------
+  // COMPLETE INSPECTION
+  // ---------------------------
+  const completeInspection = async (inspId: string) => {
+    try {
+      const { data: userData } = await supabase.auth.getUser();
+      const user = userData?.user;
+      if (!user) {
+        alert("You must be logged in to complete an inspection.");
+        return;
+      }
+
+      const { error } = await supabase
+        .from("inspections")
+        .update({
+          status: "completed",
+          submitted_at: new Date().toISOString(),
+        })
+        .eq("id", inspId);
+
+      if (error) {
+        console.error("completeInspection error", error);
+        alert(error.message || "Could not complete inspection.");
+        return;
+      }
+
+      alert("Inspection marked as completed.");
+      loadInspections();
+    } catch (e: any) {
+      console.error("completeInspection exception", e);
+      alert(e?.message || "Unknown error completing inspection.");
+    }
+  };
+
+  // ---------------------------
   // FILTER LOGIC
   // ---------------------------
   const filteredInspections =
@@ -117,7 +151,9 @@ export default function InspectionsPage() {
           ? insp.items
               .map(
                 (item: any) =>
-                  `<p><b>${item.label}</b>: ${item.answer} <i>${item.notes || ""}</i></p>`
+                  `<p><b>${item.label}</b>: ${item.answer} <i>${
+                    item.notes || ""
+                  }</i></p>`
               )
               .join("")
           : "<p>No item details recorded.</p>"
@@ -167,13 +203,11 @@ export default function InspectionsPage() {
       <h2 className="text-xl font-semibold text-purple-700">Start Inspection</h2>
       <div className="grid md:grid-cols-3 gap-4">
         {templates.map((t) => (
-          <div
-            key={t.id}
-            className="p-4 border rounded-xl bg-white shadow"
-          >
+          <div key={t.id} className="p-4 border rounded-xl bg-white shadow">
             <h3 className="font-semibold">{t.name}</h3>
             <p className="text-sm text-gray-600">Site: {t.site}</p>
             <button
+              type="button"
               onClick={() => startInspection(t)}
               className="mt-3 bg-purple-700 text-white rounded-xl px-3 py-2 w-full"
             >
@@ -193,21 +227,48 @@ export default function InspectionsPage() {
       ) : (
         <div className="space-y-4">
           {filteredInspections.map((insp) => (
-            <div
-              key={insp.id}
-              className="p-4 border rounded-xl bg-white shadow"
-            >
+            <div key={insp.id} className="p-4 border rounded-xl bg-white shadow">
               <h3 className="font-semibold">{insp.template_name}</h3>
               <p className="text-sm">Site: {insp.site}</p>
-              <p className="text-sm">Status: {insp.status}</p>
+              <p className="text-sm">
+                Status:{" "}
+                <span
+                  className={
+                    insp.status === "completed"
+                      ? "text-green-600 font-semibold"
+                      : "text-orange-600 font-semibold"
+                  }
+                >
+                  {insp.status}
+                </span>
+              </p>
+              <p className="text-xs text-gray-500">
+                Started: {new Date(insp.started_at).toLocaleString()}
+              </p>
+              {insp.submitted_at && (
+                <p className="text-xs text-gray-500">
+                  Completed: {new Date(insp.submitted_at).toLocaleString()}
+                </p>
+              )}
 
-              <div className="mt-3 flex space-x-2">
+              <div className="mt-3 flex flex-wrap gap-2">
                 <button
+                  type="button"
                   onClick={() => downloadSinglePdf(insp)}
                   className="border rounded-xl px-3 py-1"
                 >
                   PDF
                 </button>
+
+                {insp.status !== "completed" && (
+                  <button
+                    type="button"
+                    onClick={() => completeInspection(insp.id)}
+                    className="border border-green-600 text-green-700 rounded-xl px-3 py-1"
+                  >
+                    Complete
+                  </button>
+                )}
               </div>
             </div>
           ))}
