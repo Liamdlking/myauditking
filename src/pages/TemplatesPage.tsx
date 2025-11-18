@@ -184,6 +184,9 @@ export default function TemplatesPage() {
       alert(
         "Inspection started. You can continue it from the Inspections page."
       );
+
+      // If you prefer to redirect straight away, swap the alert for:
+      // window.location.href = "/inspections";
     } catch (e: any) {
       console.error("startInspection error", e);
       alert(
@@ -191,6 +194,15 @@ export default function TemplatesPage() {
           "Could not start inspection. Check the inspections table schema."
       );
     }
+  };
+
+  const handleStartInspectionClick = (
+    e: React.MouseEvent<HTMLButtonElement>,
+    tpl: TemplateRow
+  ) => {
+    e.preventDefault(); // make sure no parent form submits
+    e.stopPropagation();
+    void startInspection(tpl);
   };
 
   // ------------------------------
@@ -529,7 +541,9 @@ export default function TemplatesPage() {
       >
         <h1>Templates</h1>
         {canEditTemplates && (
-          <button onClick={openCreate}>New Template</button>
+          <button type="button" onClick={openCreate}>
+            New Template
+          </button>
         )}
       </div>
 
@@ -596,18 +610,23 @@ export default function TemplatesPage() {
                     borderBottom: "1px solid #eee",
                   }}
                 >
-                  <button onClick={() => startInspection(tpl)}>
+                  <button
+                    type="button"
+                    onClick={(e) => handleStartInspectionClick(e, tpl)}
+                  >
                     Start Inspection
                   </button>
                   {canEditTemplates && (
                     <>
                       <button
+                        type="button"
                         onClick={() => openEdit(tpl)}
                         style={{ marginLeft: "0.5rem" }}
                       >
                         Edit
                       </button>
                       <button
+                        type="button"
                         onClick={() => handleDeleteTemplate(tpl)}
                         style={{ marginLeft: "0.5rem" }}
                       >
@@ -655,7 +674,9 @@ export default function TemplatesPage() {
               }}
             >
               <h2>{isCreating ? "Create Template" : "Edit Template"}</h2>
-              <button onClick={closeModal}>Close</button>
+              <button type="button" onClick={closeModal}>
+                Close
+              </button>
             </div>
 
             <div style={{ marginBottom: "1rem" }}>
@@ -731,7 +752,9 @@ export default function TemplatesPage() {
               }}
             >
               <h3>Sections</h3>
-              <button onClick={addSection}>Add Section</button>
+              <button type="button" onClick={addSection}>
+                Add Section
+              </button>
             </div>
 
             {formSections.length === 0 && <p>No sections yet.</p>}
@@ -767,18 +790,23 @@ export default function TemplatesPage() {
                   </strong>
                   <div>
                     <button
+                      type="button"
                       onClick={() => moveSection(section.id, "up")}
                       style={{ marginRight: "0.25rem" }}
                     >
                       ↑
                     </button>
                     <button
+                      type="button"
                       onClick={() => moveSection(section.id, "down")}
                       style={{ marginRight: "0.25rem" }}
                     >
                       ↓
                     </button>
-                    <button onClick={() => deleteSection(section.id)}>
+                    <button
+                      type="button"
+                      onClick={() => deleteSection(section.id)}
+                    >
                       Delete
                     </button>
                   </div>
@@ -818,7 +846,10 @@ export default function TemplatesPage() {
                   }}
                 >
                   <span>Questions</span>
-                  <button onClick={() => addQuestionToSection(section.id)}>
+                  <button
+                    type="button"
+                    onClick={() => addQuestionToSection(section.id)}
+                  >
                     Add Question
                   </button>
                 </div>
@@ -860,6 +891,7 @@ export default function TemplatesPage() {
                       </strong>
                       <div>
                         <button
+                          type="button"
                           onClick={() =>
                             moveQuestionWithinSection(section.id, q.id, "up")
                           }
@@ -868,6 +900,7 @@ export default function TemplatesPage() {
                           ↑
                         </button>
                         <button
+                          type="button"
                           onClick={() =>
                             moveQuestionWithinSection(section.id, q.id, "down")
                           }
@@ -876,6 +909,7 @@ export default function TemplatesPage() {
                           ↓
                         </button>
                         <button
+                          type="button"
                           onClick={() =>
                             deleteQuestionFromSection(section.id, q.id)
                           }
@@ -966,6 +1000,7 @@ export default function TemplatesPage() {
                         >
                           <span>Options</span>
                           <button
+                            type="button"
                             onClick={() =>
                               addQuestionOption(section.id, q.id)
                             }
@@ -996,6 +1031,7 @@ export default function TemplatesPage() {
                               style={{ flex: 1, marginRight: "0.25rem" }}
                             />
                             <button
+                              type="button"
                               onClick={() =>
                                 removeQuestionOption(
                                   section.id,
@@ -1028,10 +1064,14 @@ export default function TemplatesPage() {
                 marginTop: "1rem",
               }}
             >
-              <button onClick={closeModal} disabled={saving}>
+              <button type="button" onClick={closeModal} disabled={saving}>
                 Cancel
               </button>
-              <button onClick={handleSaveTemplate} disabled={saving}>
+              <button
+                type="button"
+                onClick={handleSaveTemplate}
+                disabled={saving}
+              >
                 {saving ? "Saving…" : "Save Template"}
               </button>
             </div>
