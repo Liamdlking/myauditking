@@ -5,7 +5,7 @@ import AdminGuard from "@/components/AdminGuard";
 type Site = {
   id: string;
   name: string;
-  code: string | null;
+  code?: string | null;
 };
 
 type ProfileRow = {
@@ -16,13 +16,13 @@ type ProfileRow = {
   pin_code: string | null;
 };
 
-type UserView = ProfileRow & {
-  siteIds: string[]; // which sites this user can see
-};
-
 type UserSiteRow = {
   user_id: string;
   site_id: string;
+};
+
+type UserView = ProfileRow & {
+  siteIds: string[]; // which sites this user can see
 };
 
 export default function UsersPage() {
@@ -32,13 +32,14 @@ export default function UsersPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // ---------- Load data ----------
+  const [selectedSiteFilter, setSelectedSiteFilter] = useState<string>("all");
 
+  // ---------- load all data ----------
   const loadAll = async () => {
     setLoading(true);
     setError(null);
     try {
-      // 1) Sites
+      // Sites
       const { data: sitesData, error: sitesErr } = await supabase
         .from("sites")
         .select("id, name, code")
@@ -46,7 +47,7 @@ export default function UsersPage() {
 
       if (sitesErr) throw sitesErr;
 
-      // 2) Profiles
+      // Profiles
       const { data: profilesData, error: profilesErr } = await supabase
         .from("profiles")
         .select("user_id, email, display_name, role, pin_code")
@@ -54,22 +55,22 @@ export default function UsersPage() {
 
       if (profilesErr) throw profilesErr;
 
-      // 3) User-site links
+      // User-site linking table
       const { data: usData, error: usErr } = await supabase
         .from("user_sites")
         .select("user_id, site_id");
 
       if (usErr) throw usErr;
 
-      const usrSites = (usData || []) as UserSiteRow[];
-      const profileRows = (profilesData || []) as ProfileRow[];
       const siteRows = (sitesData || []) as Site[];
+      const profileRows = (profilesData || []) as ProfileRow[];
+      const userSiteRows = (usData || []) as UserSiteRow[];
 
       const combined: UserView[] = profileRows.map((p) => ({
         ...p,
         role: p.role || "inspector",
         pin_code: p.pin_code || "",
-        siteIds: usrSites
+        siteIds: userSiteRows
           .filter((us) => us.user_id === p.user_id)
           .map((us) => us.site_id),
       }));
@@ -80,7 +81,7 @@ export default function UsersPage() {
       console.error("UsersPage loadAll error", err);
       setError(
         err?.message ||
-          "Could not load users. Check Supabase policies on profiles and user_sites."
+          "Could not load users or sites. Check Supabase policies on profiles and user_sites."
       );
     } finally {
       setLoading(false);
@@ -91,7 +92,14 @@ export default function UsersPage() {
     loadAll();
   }, []);
 
-  // ---------- Helpers ----------
+  // ---------- helpers ----------
+  const labelForSite = (s: Site) =>
+    s.code ? `${s.name} (${s.code})` : s.name;
+
+  const filteredUsers =
+    selectedSiteFilter === "all"
+      ? users
+      : users.filter((u) => u.siteIds.includes(selectedSiteFilter));
 
   const updateUserLocal = (userId: string, patch: Partial<UserView>) => {
     setUsers((prev) =>
@@ -99,11 +107,7 @@ export default function UsersPage() {
     );
   };
 
-  const labelForSite = (s: Site) =>
-    s.code ? `${s.name} (${s.code})` : s.name;
-
-  // ---------- Mutations ----------
-
+  // ---------- mutations ----------
   const saveRole = async (userId: string, role: string) => {
     setSaving(true);
     setError(null);
@@ -144,7 +148,7 @@ export default function UsersPage() {
     setSaving(true);
     setError(null);
     try {
-      const cleaned = pin_code.trim() || null; // allow empty to clear
+      const cleaned = pin_code.trim() || null;
       const { error: updErr } = await supabase
         .from("profiles")
         .update({ pin_code: cleaned })
@@ -168,29 +172,33 @@ export default function UsersPage() {
     setError(null);
     try {
       if (checked) {
-        // Add row if not exists
-        const { error: insErr } = await supabase.from("user_sites").insert({
-          user_id: userId,
-          site_id: siteId,
-        });
+        // add access
+        const { error: insErr } = await supabase
+          .from("user_sites")
+          .insert({ user_id: userId, site_id: siteId });
         if (insErr) throw insErr;
-        updateUserLocal(userId, (prev => {
-          const u = users.find((x) => x.user_id === userId);
-          const current = u?.siteIds || [];
-          if (current.includes(siteId)) return {};
-          return { siteIds: [...current, siteId] } as Partial<UserView>;
-        }) as any);
+
+        updateUserLocal(userId, {
+          siteIds: [
+            ...new Set([
+              ...(users.find((u) => u.user_id === userId)?.siteIds || []),
+              siteId,
+            ]),
+          ],
+        });
       } else {
+        // remove access
         const { error: delErr } = await supabase
           .from("user_sites")
           .delete()
           .eq("user_id", userId)
           .eq("site_id", siteId);
         if (delErr) throw delErr;
+
         updateUserLocal(userId, {
-          siteIds: (users.find((u) => u.user_id === userId)?.siteIds || []).filter(
-            (id) => id !== siteId
-          ),
+          siteIds: (
+            users.find((u) => u.user_id === userId)?.siteIds || []
+          ).filter((id) => id !== siteId),
         });
       }
     } catch (err: any) {
@@ -201,24 +209,38 @@ export default function UsersPage() {
     }
   };
 
-  // ---------- Render ----------
-
+  // ---------- render ----------
   return (
     <AdminGuard>
-      <div className="max-w-5xl mx-auto py-6 space-y-4">
+      <div className="max-w-6xl mx-auto py-6 space-y-4">
         <div className="flex items-center justify-between gap-2">
           <div>
-            <h1 className="text-2xl font-bold text-royal-700">Users</h1>
+            <h1 className="text-2xl font-bold text-purple-700">Users</h1>
             <p className="text-sm text-gray-600">
-              Manage roles, PIN codes and which sites each user can access.
+              Filter by site and manage which sites each user can access.
             </p>
           </div>
-          <button
-            onClick={loadAll}
-            className="px-3 py-2 rounded-xl border text-xs hover:bg-gray-50"
-          >
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-gray-500">Filter by site:</label>
+            <select
+              value={selectedSiteFilter}
+              onChange={(e) => setSelectedSiteFilter(e.target.value)}
+              className="border rounded-xl px-3 py-2 text-sm"
+            >
+              <option value="all">All sites</option>
+              {sites.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {labelForSite(s)}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={loadAll}
+              className="px-3 py-2 rounded-xl border text-xs hover:bg-gray-50"
+            >
+              Refresh
+            </button>
+          </div>
         </div>
 
         {error && (
@@ -231,20 +253,20 @@ export default function UsersPage() {
           <div className="rounded-xl border bg-white p-4 text-sm text-gray-600">
             Loading users…
           </div>
-        ) : users.length === 0 ? (
+        ) : filteredUsers.length === 0 ? (
           <div className="rounded-xl border bg-white p-4 text-sm text-gray-600">
-            No users found in profiles. Make sure users exist in Supabase
-            Authentication and have profile rows.
+            No users found for this filter.
           </div>
         ) : (
           <div className="space-y-3">
-            {users.map((u) => (
+            {filteredUsers.map((u) => (
               <div
                 key={u.user_id}
                 className="border bg-white rounded-2xl p-4 space-y-3 text-sm"
               >
                 {/* Top row: name + email + role + PIN */}
                 <div className="grid md:grid-cols-4 gap-3 items-start">
+                  {/* Name & email */}
                   <div>
                     <label className="block text-xs text-gray-500 mb-1">
                       Name
@@ -265,6 +287,7 @@ export default function UsersPage() {
                     </div>
                   </div>
 
+                  {/* Role */}
                   <div>
                     <label className="block text-xs text-gray-500 mb-1">
                       Role
@@ -283,10 +306,11 @@ export default function UsersPage() {
                       <option value="admin">Admin</option>
                     </select>
                     <div className="text-[11px] text-gray-400 mt-1">
-                      Admins can manage users, sites and templates.
+                      Admins can manage users, sites, templates and actions.
                     </div>
                   </div>
 
+                  {/* PIN */}
                   <div>
                     <label className="block text-xs text-gray-500 mb-1">
                       Quick PIN code
@@ -308,22 +332,23 @@ export default function UsersPage() {
                     </div>
                   </div>
 
-                  <div className="text-xs text-gray-500">
-                    <div className="font-semibold text-gray-700 mb-1">
+                  {/* Sites access */}
+                  <div>
+                    <div className="block text-xs text-gray-500 mb-1">
                       Sites access
                     </div>
                     {sites.length === 0 ? (
-                      <div className="text-[11px]">
+                      <div className="text-[11px] text-gray-400">
                         No sites yet. Create sites first on the Sites page.
                       </div>
                     ) : (
-                      <div className="flex flex-col gap-1 max-h-32 overflow-auto">
+                      <div className="flex flex-col gap-1 max-h-32 overflow-auto border rounded-xl p-2">
                         {sites.map((s) => {
                           const checked = u.siteIds.includes(s.id);
                           return (
                             <label
                               key={s.id}
-                              className="inline-flex items-center gap-2"
+                              className="inline-flex items-center gap-2 text-[11px] text-gray-700"
                             >
                               <input
                                 type="checkbox"
@@ -336,9 +361,7 @@ export default function UsersPage() {
                                   )
                                 }
                               />
-                              <span className="text-[11px] text-gray-700">
-                                {labelForSite(s)}
-                              </span>
+                              <span>{labelForSite(s)}</span>
                             </label>
                           );
                         })}
