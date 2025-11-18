@@ -43,7 +43,7 @@ type Site = {
 const makeId = () =>
   (crypto as any)?.randomUUID?.() ?? Math.random().toString(36).slice(2);
 
-// Helper to normalise definition JSON from DB
+// Normalise JSON definition from DB into sections/questions
 function normaliseDefinition(def: any): TemplateSection[] {
   if (!def) {
     return [
@@ -56,7 +56,6 @@ function normaliseDefinition(def: any): TemplateSection[] {
   }
 
   if (Array.isArray(def.sections) && def.sections.length > 0) {
-    // Already in sections shape
     return def.sections.map((sec: any, secIdx: number) => ({
       id: sec.id || `sec-${secIdx + 1}`,
       title: sec.title || `Section ${secIdx + 1}`,
@@ -79,7 +78,6 @@ function normaliseDefinition(def: any): TemplateSection[] {
     }));
   }
 
-  // Legacy: flat questions array in definition.questions
   if (Array.isArray(def.questions)) {
     const questions = def.questions.map((q: any, idx: number) => ({
       id: q.id || `q-${idx + 1}`,
@@ -103,7 +101,6 @@ function normaliseDefinition(def: any): TemplateSection[] {
     ];
   }
 
-  // Fallback: empty default section
   return [
     {
       id: makeId(),
@@ -136,7 +133,6 @@ export default function TemplatesPage() {
   const [search, setSearch] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(true);
 
-  // editor modal
   const [editing, setEditing] = useState<TemplateUI | null>(null);
   const [showEditor, setShowEditor] = useState<boolean>(false);
 
@@ -353,59 +349,6 @@ export default function TemplatesPage() {
     });
   };
 
-  const handleRefImageUpload = (
-    sectionId: string,
-    questionId: string,
-    files: FileList | null
-  ) => {
-    if (!files || files.length === 0 || !editing) return;
-    const arr = Array.from(files);
-    const readers: string[] = [];
-    let remaining = arr.length;
-
-    arr.forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (typeof reader.result === "string") {
-          readers.push(reader.result as string);
-        }
-        remaining -= 1;
-        if (remaining === 0) {
-          // all done
-          handleQuestionChange(sectionId, questionId, (prevQ: any) => {
-            const existing =
-              (prevQ && Array.isArray(prevQ.refImages) && prevQ.refImages) ||
-              [];
-            return { refImages: [...existing, ...readers] };
-          } as any);
-        }
-      };
-      reader.readAsDataURL(file);
-    });
-  };
-
-  // helper to support functional patch for refImages
-  const functionalQuestionPatch = (
-    sectionId: string,
-    questionId: string,
-    fn: (q: Question) => Partial<Question>
-  ) => {
-    if (!editing) return;
-    setEditing({
-      ...editing,
-      sections: editing.sections.map((s) =>
-        s.id === sectionId
-          ? {
-              ...s,
-              questions: s.questions.map((q) =>
-                q.id === questionId ? { ...q, ...fn(q) } : q
-              ),
-            }
-          : s
-      ),
-    });
-  };
-
   const handleRefImageFiles = (
     sectionId: string,
     questionId: string,
@@ -424,9 +367,23 @@ export default function TemplatesPage() {
         }
         remaining -= 1;
         if (remaining === 0) {
-          functionalQuestionPatch(sectionId, questionId, (q) => ({
-            refImages: [...(q.refImages ?? []), ...readers],
-          }));
+          // all files read
+          setEditing((prev) => {
+            if (!prev) return prev;
+            const sections = prev.sections.map((s) => {
+              if (s.id !== sectionId) return s;
+              const questions = s.questions.map((q) => {
+                if (q.id !== questionId) return q;
+                const existing = q.refImages ?? [];
+                return {
+                  ...q,
+                  refImages: [...existing, ...readers],
+                };
+              });
+              return { ...s, questions };
+            });
+            return { ...prev, sections };
+          });
         }
       };
       reader.readAsDataURL(file);
@@ -442,7 +399,6 @@ export default function TemplatesPage() {
       return;
     }
 
-    // Build definition payload
     const definition = {
       sections: editing.sections.map((s) => ({
         id: s.id,
@@ -476,14 +432,12 @@ export default function TemplatesPage() {
 
     let error;
     if (templates.find((t) => t.id === editing.id)) {
-      // update
       const { error: upErr } = await supabase
         .from("templates")
         .update(payload)
         .eq("id", editing.id);
       error = upErr;
     } else {
-      // insert
       const { error: insErr } = await supabase
         .from("templates")
         .insert({ id: editing.id, ...payload });
@@ -500,7 +454,7 @@ export default function TemplatesPage() {
       return;
     }
 
-    await loadTemplates(); // refresh list & localStorage
+    await loadTemplates();
     closeEditor();
   };
 
@@ -539,7 +493,6 @@ export default function TemplatesPage() {
     saveTemplatesToLocalStorage(updated);
   };
 
-  // Helper to display site name from id
   const displaySiteName = (tpl: TemplateUI) => {
     const s = tpl.siteId ? sites.find((x) => x.id === tpl.siteId) : null;
     if (s) return s.code ? `${s.name} (${s.code})` : s.name;
@@ -554,8 +507,8 @@ export default function TemplatesPage() {
         <div>
           <h1 className="text-2xl font-bold text-royal-700">Templates</h1>
           <p className="text-sm text-gray-600">
-            Build SafetyCulture-style templates with sections, images and
-            multiple choice questions, and assign them to sites.
+            Build templates with sections, guidance and images, and assign them
+            to sites.
           </p>
         </div>
         <div className="flex flex-col md:flex-row gap-2 md:items-center">
