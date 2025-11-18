@@ -1,4 +1,7 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
+import { supabase } from '@/utils/supabaseClient'
+
+// ---------- Types matching your template editor ----------
 
 type QuestionType = 'yesno' | 'rating' | 'multi' | 'text'
 
@@ -27,6 +30,7 @@ type Template = {
 }
 
 type AnswerRow = {
+  dbId: string           // inspection_answers.id in Supabase
   questionId: string
   label: string
   type: QuestionType
@@ -38,27 +42,27 @@ type AnswerRow = {
   sectionHeaderImageDataUrl?: string
   answer: string
   note?: string
-  photos?: string[]
+  photos?: string[]      // maps to evidence_images[]
 }
 
 type Inspection = {
-  id: string
-  templateId: string
+  id: string             // inspections.id
   templateName: string
   site?: string
-  logoDataUrl?: string
+  logoUrl?: string
+  status: 'in_progress' | 'completed'
   startedAt: string
   completedAt?: string
   answers: AnswerRow[]
 }
 
 const TPL_KEY = 'ak_templates'
-const INSP_KEY = 'ak_inspections'
+
+// ---------- Helpers to load templates from localStorage ----------
 
 const makeId = () =>
   (crypto as any)?.randomUUID?.() ?? Math.random().toString(36).slice(2)
 
-/** Safely normalise questions coming from localStorage (old or new format) */
 function normaliseQuestions(raw: any): Question[] {
   if (!Array.isArray(raw) || raw.length === 0) return []
   if (typeof raw[0] === 'string') {
@@ -69,7 +73,6 @@ function normaliseQuestions(raw: any): Question[] {
       type: 'yesno' as QuestionType,
     }))
   }
-  // new schema: typed objects
   return raw.map((q: any, idx: number) => ({
     id: q.id || `q${idx + 1}`,
     label: q.label || String(q),
@@ -82,7 +85,6 @@ function normaliseQuestions(raw: any): Question[] {
   }))
 }
 
-/** Safely load templates (with sections) from localStorage */
 function loadTemplates(): Template[] {
   try {
     const raw = localStorage.getItem(TPL_KEY)
@@ -106,7 +108,7 @@ function loadTemplates(): Template[] {
         } as Template
       }
 
-      // fallback: flat questions -> single section
+      // fallback: flat questions
       const flatQuestions = normaliseQuestions(t.questions)
       const defaultSection: TemplateSection = {
         id: makeId(),
@@ -129,29 +131,7 @@ function loadTemplates(): Template[] {
   }
 }
 
-/** Safely load inspections from localStorage */
-function loadInspections(): Inspection[] {
-  try {
-    const raw = localStorage.getItem(INSP_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed
-  } catch (err) {
-    console.error('Failed to load inspections', err)
-    return []
-  }
-}
-
-function saveInspections(list: Inspection[]) {
-  try {
-    localStorage.setItem(INSP_KEY, JSON.stringify(list))
-  } catch (err) {
-    console.error('Failed to save inspections', err)
-  }
-}
-
-/** Group answers by section for rendering + PDF */
+// Group answers by section for UI + PDF
 function groupBySection(answers: AnswerRow[]) {
   const map: Record<string, { title: string; headerImageDataUrl?: string; rows: AnswerRow[] }> =
     {}
@@ -175,56 +155,242 @@ export default function InspectionsPage() {
   const [templates, setTemplates] = useState<Template[]>([])
   const [inspections, setInspections] = useState<Inspection[]>([])
   const [active, setActive] = useState<Inspection | null>(null)
+  const [userId, setUserId] = useState<string | null>(null)
+  const [loading, setLoading] = useState<boolean>(true)
 
-  // Initial load
+  // Load templates from localStorage
   useEffect(() => {
     setTemplates(loadTemplates())
-    setInspections(loadInspections())
   }, [])
 
-  // Persist inspections
+  // Get current Supabase user id
   useEffect(() => {
-    saveInspections(inspections)
-  }, [inspections])
+    const run = async () => {
+      const { data, error } = await supabase.auth.getUser()
+      if (error) {
+        console.error('auth.getUser error', error)
+      }
+      setUserId(data?.user?.id ?? null)
+    }
+    run()
+  }, [])
 
-  const startInspection = (tpl: Template) => {
+  // Load inspections for this user from Supabase
+  const loadInspectionsFromSupabase = useCallback(
+    async (uid: string) => {
+      setLoading(true)
+      try {
+        const { data, error } = await supabase
+          .from('inspections')
+          .select(
+            `
+            id,
+            template_name,
+            site,
+            logo_url,
+            status,
+            started_at,
+            completed_at,
+            inspection_answers (
+              id,
+              question_id,
+              label,
+              type,
+              options,
+              instruction,
+              ref_images,
+              section_id,
+              section_title,
+              section_header_image_url,
+              answer,
+              note,
+              evidence_images
+            )
+          `,
+          )
+          .eq('owner_user_id', uid)
+          .order('started_at', { ascending: false })
+
+        if (error) {
+          console.error('load inspections error', error)
+          setInspections([])
+          return
+        }
+
+        const mapped: Inspection[] =
+          data?.map((row: any) => {
+            const answers: AnswerRow[] = (row.inspection_answers || []).map((a: any) => ({
+              dbId: a.id,
+              questionId: a.question_id,
+              label: a.label,
+              type: (a.type || 'yesno') as QuestionType,
+              options: a.options || undefined,
+              instruction: a.instruction || undefined,
+              refImages: a.ref_images || undefined,
+              sectionId: a.section_id || 'default',
+              sectionTitle: a.section_title || 'Section',
+              sectionHeaderImageDataUrl: a.section_header_image_url || undefined,
+              answer: a.answer || '',
+              note: a.note || '',
+              photos: a.evidence_images || [],
+            }))
+
+            return {
+              id: row.id,
+              templateName: row.template_name,
+              site: row.site || undefined,
+              logoUrl: row.logo_url || undefined,
+              status: (row.status || 'in_progress') as 'in_progress' | 'completed',
+              startedAt: row.started_at,
+              completedAt: row.completed_at || undefined,
+              answers,
+            } as Inspection
+          }) || []
+
+        setInspections(mapped)
+
+        // If we have an active inspection, refresh it from the new data
+        if (active) {
+          const refreshed = mapped.find(i => i.id === active.id)
+          if (refreshed) {
+            setActive(refreshed)
+          }
+        }
+      } finally {
+        setLoading(false)
+      }
+    },
+    [active],
+  )
+
+  // Kick off initial load once we know userId
+  useEffect(() => {
+    if (!userId) {
+      setLoading(false)
+      return
+    }
+    loadInspectionsFromSupabase(userId)
+  }, [userId, loadInspectionsFromSupabase])
+
+  // Realtime subscription: any changes on inspections / inspection_answers trigger a reload
+  useEffect(() => {
+    if (!userId) return
+    const channel = supabase
+      .channel('inspections-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'inspections' },
+        () => {
+          loadInspectionsFromSupabase(userId)
+        },
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'inspection_answers' },
+        () => {
+          loadInspectionsFromSupabase(userId)
+        },
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [userId, loadInspectionsFromSupabase])
+
+  // ---------- Actions ----------
+
+  const startInspection = async (tpl: Template) => {
+    if (!userId) {
+      alert('You must be logged in to start an inspection.')
+      return
+    }
     try {
-      const answers: AnswerRow[] = []
+      // 1) create inspection row
+      const { data: inspRow, error: inspErr } = await supabase
+        .from('inspections')
+        .insert({
+          template_name: tpl.name,
+          site: tpl.site ?? null,
+          logo_url: tpl.logoDataUrl ?? null,
+          owner_user_id: userId,
+          status: 'in_progress',
+        })
+        .select('*')
+        .single()
 
+      if (inspErr || !inspRow) {
+        console.error('startInspection: insert inspections error', inspErr)
+        alert('Could not start inspection (inspections).')
+        return
+      }
+
+      // 2) create answers rows
+      const answerPayload: any[] = []
       ;(tpl.sections || []).forEach(sec => {
         ;(sec.questions || []).forEach(q => {
-          answers.push({
-            questionId: q.id,
+          answerPayload.push({
+            inspection_id: inspRow.id,
+            question_id: q.id,
             label: q.label,
             type: q.type,
-            options: q.options,
-            instruction: q.instruction,
-            refImages: q.refImages,
-            sectionId: sec.id,
-            sectionTitle: sec.title,
-            sectionHeaderImageDataUrl: sec.headerImageDataUrl,
+            options: q.options || null,
+            instruction: q.instruction || null,
+            ref_images: q.refImages || null,
+            section_id: sec.id,
+            section_title: sec.title,
+            section_header_image_url: sec.headerImageDataUrl || null,
             answer: '',
             note: '',
-            photos: [],
+            evidence_images: [],
           })
         })
       })
 
+      const { data: ansRows, error: ansErr } = await supabase
+        .from('inspection_answers')
+        .insert(answerPayload)
+        .select('*')
+
+      if (ansErr) {
+        console.error('startInspection: insert answers error', ansErr)
+        alert('Could not start inspection (answers).')
+        return
+      }
+
+      const answers: AnswerRow[] =
+        ansRows?.map((a: any) => ({
+          dbId: a.id,
+          questionId: a.question_id,
+          label: a.label,
+          type: (a.type || 'yesno') as QuestionType,
+          options: a.options || undefined,
+          instruction: a.instruction || undefined,
+          refImages: a.ref_images || undefined,
+          sectionId: a.section_id || 'default',
+          sectionTitle: a.section_title || 'Section',
+          sectionHeaderImageDataUrl: a.section_header_image_url || undefined,
+          answer: a.answer || '',
+          note: a.note || '',
+          photos: a.evidence_images || [],
+        })) || []
+
       const insp: Inspection = {
-        id: makeId(),
-        templateId: tpl.id,
-        templateName: tpl.name,
-        site: tpl.site,
-        logoDataUrl: tpl.logoDataUrl,
-        startedAt: new Date().toISOString(),
+        id: inspRow.id,
+        templateName: inspRow.template_name,
+        site: inspRow.site || undefined,
+        logoUrl: inspRow.logo_url || undefined,
+        status: (inspRow.status || 'in_progress') as 'in_progress' | 'completed',
+        startedAt: inspRow.started_at,
+        completedAt: inspRow.completed_at || undefined,
         answers,
       }
 
       setInspections(prev => [insp, ...prev])
       setActive(insp)
     } catch (err) {
-      console.error('Error starting inspection', err)
-      alert('Could not start inspection – check the console for details.')
+      console.error('startInspection error', err)
+      alert('Could not start inspection.')
     }
   }
 
@@ -232,23 +398,36 @@ export default function InspectionsPage() {
     setActive(insp)
   }
 
-  const updateInspectionInList = (updated: Inspection) => {
-    setInspections(prev => prev.map(i => (i.id === updated.id ? updated : i)))
-  }
-
-  const setAnswer = (index: number, patch: Partial<AnswerRow>) => {
+  const setAnswer = async (rowIndex: number, patch: Partial<AnswerRow>) => {
     if (!active) return
-    const updatedAnswers = active.answers ? [...active.answers] : []
-    if (!updatedAnswers[index]) return
+    const answers = [...active.answers]
+    const target = answers[rowIndex]
+    if (!target) return
 
-    updatedAnswers[index] = { ...updatedAnswers[index], ...patch }
+    const updatedRow: AnswerRow = { ...target, ...patch }
+    answers[rowIndex] = updatedRow
 
-    const updated: Inspection = { ...active, answers: updatedAnswers }
-    setActive(updated)
-    updateInspectionInList(updated)
+    setActive({ ...active, answers })
+
+    // Update DB
+    try {
+      const payload: any = {}
+      if (patch.answer !== undefined) payload.answer = patch.answer
+      if (patch.note !== undefined) payload.note = patch.note
+      if (patch.photos !== undefined) payload.evidence_images = patch.photos
+
+      if (Object.keys(payload).length > 0) {
+        await supabase
+          .from('inspection_answers')
+          .update(payload)
+          .eq('id', target.dbId)
+      }
+    } catch (err) {
+      console.error('setAnswer db update error', err)
+    }
   }
 
-  const handlePhotoChange = (index: number, files: FileList | null) => {
+  const handlePhotoChange = (rowIndex: number, files: FileList | null) => {
     if (!files || files.length === 0 || !active) return
     const fileArray = Array.from(files)
     const readersDone: string[] = []
@@ -262,33 +441,48 @@ export default function InspectionsPage() {
         }
         remaining -= 1
         if (remaining === 0) {
-          const existing = active.answers[index]?.photos || []
-          setAnswer(index, { photos: [...existing, ...readersDone] })
+          const existing = active.answers[rowIndex]?.photos || []
+          const merged = [...existing, ...readersDone]
+          setAnswer(rowIndex, { photos: merged })
         }
       }
       reader.readAsDataURL(file)
     })
   }
 
-  const saveInspectionProgress = () => {
-    setActive(null)
-  }
-
-  const discardInspection = () => {
+  const discardInspection = async () => {
     if (!active) return
     if (!confirm('Discard this inspection? This cannot be undone.')) return
-    setInspections(prev => prev.filter(i => i.id !== active.id))
+    try {
+      await supabase.from('inspections').delete().eq('id', active.id)
+      setInspections(prev => prev.filter(i => i.id !== active.id))
+      setActive(null)
+    } catch (err) {
+      console.error('discardInspection error', err)
+    }
+  }
+
+  const saveInspectionProgress = () => {
+    // Nothing special to do: changes already synced per answer
     setActive(null)
   }
 
-  const completeInspection = () => {
+  const completeInspection = async () => {
     if (!active) return
-    const done: Inspection = {
-      ...active,
-      completedAt: new Date().toISOString(),
+    try {
+      const now = new Date().toISOString()
+      await supabase
+        .from('inspections')
+        .update({ status: 'completed', completed_at: now })
+        .eq('id', active.id)
+
+      const updated: Inspection = { ...active, status: 'completed', completedAt: now }
+      setActive(updated)
+      setInspections(prev => prev.map(i => (i.id === updated.id ? updated : i)))
+    } catch (err) {
+      console.error('completeInspection error', err)
+      alert('Could not complete inspection.')
     }
-    setActive(null)
-    updateInspectionInList(done)
   }
 
   const renderAnswerInput = (row: AnswerRow, index: number) => {
@@ -467,8 +661,8 @@ export default function InspectionsPage() {
       })
       .join('')
 
-    const logoHtml = insp.logoDataUrl
-      ? `<img src="${insp.logoDataUrl}" style="width:32px;height:32px;border-radius:999px;object-fit:cover;border:1px solid #e5e7eb;" />`
+    const logoHtml = insp.logoUrl
+      ? `<img src="${insp.logoUrl}" style="width:32px;height:32px;border-radius:999px;object-fit:cover;border:1px solid #e5e7eb;" />`
       : `<div style="width:32px;height:32px;border-radius:999px;background:linear-gradient(135deg,#3730a3,#facc15);"></div>`
 
     const html = `
@@ -539,8 +733,10 @@ export default function InspectionsPage() {
     return groupBySection(answers)
   }
 
-  const inProgress = inspections.filter(i => !i.completedAt)
-  const completed = inspections.filter(i => i.completedAt)
+  const inProgress = inspections.filter(i => i.status === 'in_progress')
+  const completed = inspections.filter(i => i.status === 'completed')
+
+  // ---------- Render ----------
 
   return (
     <div className="max-w-5xl mx-auto py-6 space-y-6">
@@ -548,13 +744,16 @@ export default function InspectionsPage() {
         <div>
           <h1 className="text-2xl font-bold text-royal-700">Inspections</h1>
           <p className="text-sm text-gray-600">
-            Run inspections with sections, header images, reference images and instructions. Save
-            in progress, or complete and export as PDF.
+            Supabase-backed inspections with sections, images, notes and PDF export.
           </p>
         </div>
       </div>
 
-      {/* No active inspection: show lists */}
+      {loading && (
+        <div className="text-sm text-gray-500">Loading inspections…</div>
+      )}
+
+      {/* No active inspection: lists */}
       {!active && (
         <>
           {/* Start new */}
@@ -602,9 +801,9 @@ export default function InspectionsPage() {
                 className="bg-white border rounded-2xl p-4 flex flex-col md:flex-row justify-between gap-3 text-sm"
               >
                 <div className="flex items-start gap-2">
-                  {insp.logoDataUrl && (
+                  {insp.logoUrl && (
                     <img
-                      src={insp.logoDataUrl}
+                      src={insp.logoUrl}
                       alt="logo"
                       className="w-8 h-8 rounded-full object-cover border"
                     />
@@ -647,9 +846,9 @@ export default function InspectionsPage() {
               <div key={insp.id} className="bg-white border rounded-2xl p-4">
                 <div className="flex justify-between text-sm">
                   <div className="flex items-start gap-2">
-                    {insp.logoDataUrl && (
+                    {insp.logoUrl && (
                       <img
-                        src={insp.logoDataUrl}
+                        src={insp.logoUrl}
                         alt="logo"
                         className="w-8 h-8 rounded-full object-cover border"
                       />
@@ -754,16 +953,18 @@ export default function InspectionsPage() {
         <div className="bg-white border rounded-2xl p-4 space-y-3">
           <div className="flex justify-between items-center">
             <div className="flex items-start gap-2">
-              {active.logoDataUrl && (
+              {active.logoUrl && (
                 <img
-                  src={active.logoDataUrl}
+                  src={active.logoUrl}
                   alt="logo"
                   className="w-8 h-8 rounded-full object-cover border"
                 />
               )}
               <div>
                 <h2 className="font-semibold text-royal-700">{active.templateName}</h2>
-                {active.site && <div className="text-xs text-gray-500">Site: {active.site}</div>}
+                {active.site && (
+                  <div className="text-xs text-gray-500">Site: {active.site}</div>
+                )}
                 <div className="text-xs text-gray-500">
                   Started: {active.startedAt.slice(0, 16).replace('T', ' ')}
                 </div>
@@ -801,7 +1002,9 @@ export default function InspectionsPage() {
                         className="w-8 h-8 rounded-lg object-cover border"
                       />
                     )}
-                    <div className="font-semibold text-sm text-gray-800">{sec.title}</div>
+                    <div className="font-semibold text-sm text-gray-800">
+                      {sec.title}
+                    </div>
                   </div>
                   {sec.rows.map((row, localIdx) => {
                     const globalIndex = active.answers.findIndex(
@@ -845,7 +1048,7 @@ export default function InspectionsPage() {
                         />
                         <div className="flex flex-col gap-1 mt-2">
                           <label className="text-xs text-gray-500">
-                            Attach photos (stored in this browser only)
+                            Attach photos (stored in Supabase as data URLs)
                           </label>
                           <input
                             type="file"
