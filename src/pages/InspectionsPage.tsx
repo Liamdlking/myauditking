@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { supabase } from '@/utils/supabaseClient'
 
-// ---------- Types matching your template editor ----------
+// ---------- Types shared with TemplatesPage ----------
 
 type QuestionType = 'yesno' | 'rating' | 'multi' | 'text'
 
@@ -56,9 +56,7 @@ type Inspection = {
   answers: AnswerRow[]
 }
 
-const TPL_KEY = 'ak_templates'
-
-// ---------- Helpers to load templates from localStorage ----------
+// ---------- Helpers for decoding templates from Supabase ----------
 
 const makeId = () =>
   (crypto as any)?.randomUUID?.() ?? Math.random().toString(36).slice(2)
@@ -66,7 +64,6 @@ const makeId = () =>
 function normaliseQuestions(raw: any): Question[] {
   if (!Array.isArray(raw) || raw.length === 0) return []
   if (typeof raw[0] === 'string') {
-    // very old schema: strings only
     return raw.map((label: string) => ({
       id: makeId(),
       label,
@@ -85,56 +82,46 @@ function normaliseQuestions(raw: any): Question[] {
   }))
 }
 
-function loadTemplates(): Template[] {
-  try {
-    const raw = localStorage.getItem(TPL_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
+function templateFromRow(row: any): Template {
+  const def = row.definition || {}
+  const sectionsRaw = Array.isArray(def.sections) ? def.sections : []
 
-    return parsed.map((t: any) => {
-      if (Array.isArray(t.sections) && t.sections.length > 0) {
-        return {
-          id: t.id || makeId(),
-          name: t.name || 'Untitled',
-          site: t.site || '',
-          logoDataUrl: t.logoDataUrl || undefined,
-          sections: t.sections.map((s: any, idx: number) => ({
-            id: s.id || `sec-${idx + 1}`,
-            title: s.title || `Section ${idx + 1}`,
-            headerImageDataUrl: s.headerImageDataUrl || undefined,
-            questions: normaliseQuestions(s.questions),
-          })),
-        } as Template
-      }
+  let sections: TemplateSection[]
 
-      // fallback: flat questions
-      const flatQuestions = normaliseQuestions(t.questions)
-      const defaultSection: TemplateSection = {
+  if (sectionsRaw.length > 0) {
+    sections = sectionsRaw.map((s: any, idx: number) => ({
+      id: s.id || `sec-${idx + 1}`,
+      title: s.title || `Section ${idx + 1}`,
+      headerImageDataUrl: s.headerImageDataUrl || undefined,
+      questions: normaliseQuestions(s.questions),
+    }))
+  } else {
+    const flatQuestions = normaliseQuestions(def.questions)
+    sections = [
+      {
         id: makeId(),
         title: 'General',
         headerImageDataUrl: undefined,
         questions: flatQuestions,
-      }
+      },
+    ]
+  }
 
-      return {
-        id: t.id || makeId(),
-        name: t.name || 'Untitled',
-        site: t.site || '',
-        logoDataUrl: t.logoDataUrl || undefined,
-        sections: [defaultSection],
-      } as Template
-    })
-  } catch (err) {
-    console.error('Failed to load templates for inspections', err)
-    return []
+  return {
+    id: row.id,
+    name: row.name || 'Untitled',
+    site: row.site || '',
+    logoDataUrl: row.logo_data_url || undefined,
+    sections,
   }
 }
 
 // Group answers by section for UI + PDF
 function groupBySection(answers: AnswerRow[]) {
-  const map: Record<string, { title: string; headerImageDataUrl?: string; rows: AnswerRow[] }> =
-    {}
+  const map: Record<
+    string,
+    { title: string; headerImageDataUrl?: string; rows: AnswerRow[] }
+  > = {}
 
   answers.forEach(row => {
     const id = row.sectionId || 'default'
@@ -158,12 +145,7 @@ export default function InspectionsPage() {
   const [userId, setUserId] = useState<string | null>(null)
   const [loading, setLoading] = useState<boolean>(true)
 
-  // Load templates from localStorage
-  useEffect(() => {
-    setTemplates(loadTemplates())
-  }, [])
-
-  // Get current Supabase user id
+  // Get current Supabase user id (so we only run when logged in)
   useEffect(() => {
     const run = async () => {
       const { data, error } = await supabase.auth.getUser()
@@ -175,104 +157,125 @@ export default function InspectionsPage() {
     run()
   }, [])
 
-  // Load inspections for this user from Supabase
-  const loadInspectionsFromSupabase = useCallback(
-    async (uid: string) => {
-      setLoading(true)
-      try {
-        const { data, error } = await supabase
-          .from('inspections')
-          .select(
-            `
-            id,
-            template_name,
-            site,
-            logo_url,
-            status,
-            started_at,
-            completed_at,
-            inspection_answers (
-              id,
-              question_id,
-              label,
-              type,
-              options,
-              instruction,
-              ref_images,
-              section_id,
-              section_title,
-              section_header_image_url,
-              answer,
-              note,
-              evidence_images
-            )
-          `,
-          )
-          .eq('owner_user_id', uid)
-          .order('started_at', { ascending: false })
+  // Load templates from Supabase (shared across all users)
+  const loadTemplatesFromSupabase = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('templates')
+        .select('id, name, site, logo_data_url, definition')
+        .order('created_at', { ascending: true })
 
-        if (error) {
-          console.error('load inspections error', error)
-          setInspections([])
-          return
-        }
-
-        const mapped: Inspection[] =
-          data?.map((row: any) => {
-            const answers: AnswerRow[] = (row.inspection_answers || []).map((a: any) => ({
-              dbId: a.id,
-              questionId: a.question_id,
-              label: a.label,
-              type: (a.type || 'yesno') as QuestionType,
-              options: a.options || undefined,
-              instruction: a.instruction || undefined,
-              refImages: a.ref_images || undefined,
-              sectionId: a.section_id || 'default',
-              sectionTitle: a.section_title || 'Section',
-              sectionHeaderImageDataUrl: a.section_header_image_url || undefined,
-              answer: a.answer || '',
-              note: a.note || '',
-              photos: a.evidence_images || [],
-            }))
-
-            return {
-              id: row.id,
-              templateName: row.template_name,
-              site: row.site || undefined,
-              logoUrl: row.logo_url || undefined,
-              status: (row.status || 'in_progress') as 'in_progress' | 'completed',
-              startedAt: row.started_at,
-              completedAt: row.completed_at || undefined,
-              answers,
-            } as Inspection
-          }) || []
-
-        setInspections(mapped)
-
-        // If we have an active inspection, refresh it from the new data
-        if (active) {
-          const refreshed = mapped.find(i => i.id === active.id)
-          if (refreshed) {
-            setActive(refreshed)
-          }
-        }
-      } finally {
-        setLoading(false)
+      if (error) {
+        console.error('load templates error', error)
+        setTemplates([])
+        return
       }
-    },
-    [active],
-  )
 
-  // Kick off initial load once we know userId
+      const mapped: Template[] = (data || []).map(templateFromRow)
+      setTemplates(mapped)
+    } catch (err) {
+      console.error('loadTemplatesFromSupabase error', err)
+      setTemplates([])
+    }
+  }, [])
+
   useEffect(() => {
+    if (!userId) return
+    loadTemplatesFromSupabase()
+  }, [userId, loadTemplatesFromSupabase])
+
+  // Load ALL inspections from Supabase (shared between all users)
+  const loadInspectionsFromSupabase = useCallback(async () => {
     if (!userId) {
       setLoading(false)
       return
     }
-    loadInspectionsFromSupabase(userId)
+    setLoading(true)
+    try {
+      const { data, error } = await supabase
+        .from('inspections')
+        .select(
+          `
+          id,
+          template_name,
+          site,
+          logo_url,
+          status,
+          started_at,
+          completed_at,
+          inspection_answers (
+            id,
+            question_id,
+            label,
+            type,
+            options,
+            instruction,
+            ref_images,
+            section_id,
+            section_title,
+            section_header_image_url,
+            answer,
+            note,
+            evidence_images
+          )
+        `,
+        )
+        .order('started_at', { ascending: false })
+
+      if (error) {
+        console.error('load inspections error', error)
+        setInspections([])
+        return
+      }
+
+      const mapped: Inspection[] =
+        data?.map((row: any) => {
+          const answers: AnswerRow[] = (row.inspection_answers || []).map((a: any) => ({
+            dbId: a.id,
+            questionId: a.question_id,
+            label: a.label,
+            type: (a.type || 'yesno') as QuestionType,
+            options: a.options || undefined,
+            instruction: a.instruction || undefined,
+            refImages: a.ref_images || undefined,
+            sectionId: a.section_id || 'default',
+            sectionTitle: a.section_title || 'Section',
+            sectionHeaderImageDataUrl: a.section_header_image_url || undefined,
+            answer: a.answer || '',
+            note: a.note || '',
+            photos: a.evidence_images || [],
+          }))
+
+          return {
+            id: row.id,
+            templateName: row.template_name,
+            site: row.site || undefined,
+            logoUrl: row.logo_url || undefined,
+            status: (row.status || 'in_progress') as 'in_progress' | 'completed',
+            startedAt: row.started_at,
+            completedAt: row.completed_at || undefined,
+            answers,
+          } as Inspection
+        }) || []
+
+      setInspections(mapped)
+
+      // Refresh active inspection if it's open
+      if (active) {
+        const refreshed = mapped.find(i => i.id === active.id)
+        if (refreshed) setActive(refreshed)
+      }
+    } finally {
+      setLoading(false)
+    }
+  }, [active, userId])
+
+  useEffect(() => {
+    if (!userId) return
+    loadInspectionsFromSupabase()
   }, [userId, loadInspectionsFromSupabase])
 
-  // Realtime subscription: any changes on inspections / inspection_answers trigger a reload
+  // Realtime: any change to inspections / inspection_answers triggers reload
   useEffect(() => {
     if (!userId) return
     const channel = supabase
@@ -280,16 +283,12 @@ export default function InspectionsPage() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'inspections' },
-        () => {
-          loadInspectionsFromSupabase(userId)
-        },
+        () => loadInspectionsFromSupabase(),
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'inspection_answers' },
-        () => {
-          loadInspectionsFromSupabase(userId)
-        },
+        () => loadInspectionsFromSupabase(),
       )
       .subscribe()
 
@@ -313,7 +312,7 @@ export default function InspectionsPage() {
           template_name: tpl.name,
           site: tpl.site ?? null,
           logo_url: tpl.logoDataUrl ?? null,
-          owner_user_id: userId,
+          owner_user_id: userId, // still recorded, but not used for filtering
           status: 'in_progress',
         })
         .select('*')
@@ -471,7 +470,7 @@ export default function InspectionsPage() {
   }
 
   const saveInspectionProgress = () => {
-    // Nothing special to do: changes already synced per answer
+    // Nothing extra: changes already synced answer-by-answer
     setActive(null)
   }
 
@@ -752,14 +751,12 @@ export default function InspectionsPage() {
         <div>
           <h1 className="text-2xl font-bold text-royal-700">Inspections</h1>
           <p className="text-sm text-gray-600">
-            Supabase-backed inspections with sections, images, notes and PDF export.
+            Shared inspections with sections, images, notes and PDF export (Supabase).
           </p>
         </div>
       </div>
 
-      {loading && (
-        <div className="text-sm text-gray-500">Loading inspections…</div>
-      )}
+      {loading && <div className="text-sm text-gray-500">Loading inspections…</div>}
 
       {/* No active inspection: lists */}
       {!active && (
