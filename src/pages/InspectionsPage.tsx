@@ -68,10 +68,11 @@ export default function InspectionsPage() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   // Modal state
-  const [activeInspection, setActiveInspection] =
+    const [activeInspection, setActiveInspection] =
     useState<InspectionRow | null>(null);
   const [activeDefinition, setActiveDefinition] =
     useState<TemplateDefinition | null>(null);
+  const [templateLogo, setTemplateLogo] = useState<string | null>(null);
   const [answers, setAnswers] = useState<InspectionAnswer[]>([]);
   const [modalLoading, setModalLoading] = useState(false);
   const [modalSaving, setModalSaving] = useState(false);
