@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { supabase } from "@/utils/supabaseClient";
 import jsPDF from "jspdf";
+import { supabase } from "@/utils/supabaseClient";
 
 type Role = "admin" | "manager" | "inspector" | string | null;
+type Status = "in_progress" | "completed";
 
 type QuestionType = "yes_no_na" | "good_fair_poor" | "multiple_choice" | "text";
 
@@ -27,68 +28,104 @@ type TemplateDefinition = {
   sections: TemplateSection[];
 };
 
-type InspectionStatus = "in_progress" | "submitted";
-
-type InspectionAnswer = {
-  sectionId: string;
-  questionId: string;
-  value: string | null; // "yes" | "no" | "na" | "good" | "fair" | "poor" | option text | free text
-  notes?: string;
-  photos?: string[]; // base64 data URLs
+type InspectionItem = {
+  section_id: string;
+  section_title: string;
+  question_id: string;
+  question_label: string;
+  type: QuestionType;
+  value: string | null;
+  choice_key: string | null;
+  choice_label: string | null;
+  notes: string | null;
+  photos: string[];
+  required: boolean;
 };
 
 type InspectionRow = {
   id: string;
   template_id: string;
   template_name: string;
+  site_id: string | null;
   site: string | null;
-  status: InspectionStatus;
-  started_at: string | null;
+  status: Status;
+  started_at: string;
   submitted_at: string | null;
   score: number | null;
-  items: InspectionAnswer[] | null;
+  items: InspectionItem[] | null;
   owner_user_id: string | null;
   owner_name: string | null;
 };
+
+type SiteRow = {
+  id: string;
+  name: string;
+};
+
+type ModalAnswer = {
+  section_id: string;
+  section_title: string;
+  question_id: string;
+  question_label: string;
+  type: QuestionType;
+  value: string | null;
+  choice_key: string | null;
+  choice_label: string | null;
+  notes: string | null;
+  photos: string[];
+  required: boolean;
+};
+
+function randomId(prefix: string) {
+  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function formatDateTime(iso: string | null) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString();
+}
 
 export default function InspectionsPage() {
   const [role, setRole] = useState<Role>(null);
   const [roleLoading, setRoleLoading] = useState(true);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
 
+  const [sites, setSites] = useState<SiteRow[]>([]);
   const [inspections, setInspections] = useState<InspectionRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [filterStatus, setFilterStatus] = useState<
-    "all" | "in_progress" | "submitted"
-  >("all");
+  const [selectedSiteId, setSelectedSiteId] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | Status>("all");
 
-  // Multi-select state
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   // Modal state
-    const [activeInspection, setActiveInspection] =
+  const [modalOpen, setModalOpen] = useState(false);
+  const [activeInspection, setActiveInspection] =
     useState<InspectionRow | null>(null);
   const [activeDefinition, setActiveDefinition] =
     useState<TemplateDefinition | null>(null);
   const [templateLogo, setTemplateLogo] = useState<string | null>(null);
-  const [answers, setAnswers] = useState<InspectionAnswer[]>([]);
+  const [answers, setAnswers] = useState<ModalAnswer[]>([]);
   const [modalLoading, setModalLoading] = useState(false);
   const [modalSaving, setModalSaving] = useState(false);
 
-  // ------------------------------
-  // Load current user & role
-  // ------------------------------
+  // --------------------------
+  // Load user + role
+  // --------------------------
   useEffect(() => {
-    const loadUserAndRole = async () => {
+    const loadUserRole = async () => {
       setRoleLoading(true);
       try {
         const { data: userData } = await supabase.auth.getUser();
         const user = userData?.user;
         if (!user) {
-          setRole(null);
           setCurrentUserId(null);
+          setRole(null);
           return;
         }
         setCurrentUserId(user.id);
@@ -111,16 +148,37 @@ export default function InspectionsPage() {
       }
     };
 
-    loadUserAndRole();
+    loadUserRole();
   }, []);
 
   const isAdmin = role === "admin";
   const isManager = role === "manager";
-  const isInspector = role === "inspector" || !role;
+  const canSeeAll = isAdmin || isManager;
 
-  // ------------------------------
-  // Load inspections list
-  // ------------------------------
+  // --------------------------
+  // Load sites
+  // --------------------------
+  const loadSites = async () => {
+    try {
+      const { data, error } = await supabase
+        .from("sites")
+        .select("id, name")
+        .order("name", { ascending: true });
+      if (error) throw error;
+      setSites(
+        (data || []).map((s: any) => ({
+          id: s.id,
+          name: s.name,
+        }))
+      );
+    } catch (e) {
+      console.error("loadSites error", e);
+    }
+  };
+
+  // --------------------------
+  // Load inspections
+  // --------------------------
   const loadInspections = async () => {
     setLoading(true);
     setError(null);
@@ -128,32 +186,33 @@ export default function InspectionsPage() {
       const { data, error } = await supabase
         .from("inspections")
         .select(
-          "id, template_id, template_name, site, status, started_at, submitted_at, score, items, owner_user_id, owner_name"
+          "id, template_id, template_name, site_id, site, status, started_at, submitted_at, score, items, owner_user_id, owner_name"
         )
         .order("started_at", { ascending: false });
 
       if (error) throw error;
 
-      const mapped = (data || []).map((i: any) => ({
+      const mapped: InspectionRow[] = (data || []).map((i: any) => ({
         id: i.id,
         template_id: i.template_id,
         template_name: i.template_name,
-        site: i.site,
-        status: i.status as InspectionStatus,
+        site_id: i.site_id || null,
+        site: i.site || null,
+        status: (i.status as Status) || "in_progress",
         started_at: i.started_at,
-        submitted_at: i.submitted_at,
-        score: i.score,
-        items: (i.items || []) as InspectionAnswer[],
-        owner_user_id: i.owner_user_id,
-        owner_name: i.owner_name,
-      })) as InspectionRow[];
+        submitted_at: i.submitted_at || null,
+        score: i.score === null ? null : Number(i.score),
+        items: (i.items as InspectionItem[]) || null,
+        owner_user_id: i.owner_user_id || null,
+        owner_name: i.owner_name || null,
+      }));
 
       setInspections(mapped);
-      setSelectedIds([]); // clear selection whenever list reloads
     } catch (e: any) {
       console.error("loadInspections error", e);
       setError(
-        e?.message || "Could not load inspections. Check Supabase settings."
+        e?.message ||
+          "Could not load inspections. Check the inspections table schema."
       );
     } finally {
       setLoading(false);
@@ -161,108 +220,135 @@ export default function InspectionsPage() {
   };
 
   useEffect(() => {
+    loadSites();
     loadInspections();
   }, []);
 
-  // ------------------------------
-  // Filtered list
-  // ------------------------------
+  // --------------------------
+  // Filters
+  // --------------------------
   const filteredInspections = useMemo(() => {
-    return inspections.filter((i) => {
-      if (filterStatus !== "all" && i.status !== filterStatus) {
+    return inspections.filter((insp) => {
+      if (!canSeeAll && currentUserId && insp.owner_user_id !== currentUserId) {
+        return false;
+      }
+      if (selectedSiteId !== "all" && insp.site_id !== selectedSiteId) {
+        return false;
+      }
+      if (statusFilter !== "all" && insp.status !== statusFilter) {
         return false;
       }
       return true;
     });
-  }, [inspections, filterStatus]);
+  }, [inspections, canSeeAll, currentUserId, selectedSiteId, statusFilter]);
 
-  // ------------------------------
-  // Selection helpers
-  // ------------------------------
+  const inProgress = filteredInspections.filter(
+    (i) => i.status === "in_progress"
+  );
+  const completed = filteredInspections.filter(
+    (i) => i.status === "completed"
+  );
+
+  const siteNameFor = (site_id: string | null) => {
+    if (!site_id) return "All sites";
+    const s = sites.find((x) => x.id === site_id);
+    return s ? s.name : "Unknown site";
+  };
+
+  // --------------------------
+  // Selection for bulk actions
+  // --------------------------
   const toggleSelected = (id: string) => {
     setSelectedIds((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     );
   };
 
-  const selectAllVisible = () => {
-    const visibleIds = filteredInspections.map((i) => i.id);
-    setSelectedIds(visibleIds);
+  const clearSelection = () => setSelectedIds([]);
+
+  const allVisibleIds = filteredInspections.map((i) => i.id);
+  const allSelected = allVisibleIds.length > 0 &&
+    allVisibleIds.every((id) => selectedIds.includes(id));
+
+  const toggleSelectAllVisible = () => {
+    if (allSelected) {
+      setSelectedIds((prev) => prev.filter((id) => !allVisibleIds.includes(id)));
+    } else {
+      setSelectedIds((prev) => Array.from(new Set([...prev, ...allVisibleIds])));
+    }
   };
 
-  const clearSelection = () => {
-    setSelectedIds([]);
-  };
-
-  const selectedInspections = useMemo(
-    () => inspections.filter((i) => selectedIds.includes(i.id)),
-    [inspections, selectedIds]
-  );
-
-  // ------------------------------
+  // --------------------------
   // Open inspection modal
-  // ------------------------------
+  // --------------------------
   const openInspectionModal = async (insp: InspectionRow) => {
-    setModalLoading(true);
+    setModalOpen(true);
     setActiveInspection(insp);
     setActiveDefinition(null);
+    setTemplateLogo(null);
     setAnswers([]);
+    setModalLoading(true);
+    setModalSaving(false);
 
     try {
-            const { data, error } = await supabase
+      // Load template definition + logo
+      const { data, error } = await supabase
         .from("templates")
         .select("definition, logo_data_url")
         .eq("id", insp.template_id)
         .single();
-      const def: TemplateDefinition =
-        (data?.definition as TemplateDefinition) || { sections: [] };
-
-      const logo = (data as any)?.logo_data_url as string | null | undefined;
-      setTemplateLogo(logo || null);
 
       if (error) throw error;
 
-      const def: TemplateDefinition =
+      const definition: TemplateDefinition =
         (data?.definition as TemplateDefinition) || { sections: [] };
+      const logo = (data as any)?.logo_data_url as string | null | undefined;
 
-      const sections = def.sections || [];
-      const existingAnswers: InspectionAnswer[] = insp.items || [];
-      const builtAnswers: InspectionAnswer[] = [];
+      setActiveDefinition(definition);
+      setTemplateLogo(logo || null);
 
-      for (const sec of sections) {
-        for (const q of sec.questions || []) {
-          const existing = existingAnswers.find(
-            (a) => a.questionId === q.id
+      // Build answers from definition OR from existing items
+      const existingItems: InspectionItem[] = insp.items || [];
+
+      const built: ModalAnswer[] = [];
+      for (const section of definition.sections || []) {
+        for (const q of section.questions || []) {
+          const existing = existingItems.find(
+            (it) =>
+              it.section_id === section.id && it.question_id === q.id
           );
-          if (existing) {
-            builtAnswers.push(existing);
-          } else {
-            builtAnswers.push({
-              sectionId: sec.id,
-              questionId: q.id,
-              value: null,
-              notes: "",
-              photos: [],
-            });
-          }
+          built.push({
+            section_id: section.id,
+            section_title: section.title,
+            question_id: q.id,
+            question_label: q.label,
+            type: q.type,
+            value: existing ? existing.value : null,
+            choice_key: existing ? existing.choice_key : null,
+            choice_label: existing ? existing.choice_label : null,
+            notes: existing ? existing.notes : null,
+            photos: existing ? existing.photos || [] : [],
+            required: q.required,
+          });
         }
       }
 
-      setActiveDefinition(def);
-      setAnswers(builtAnswers);
+      setAnswers(built);
     } catch (e: any) {
       console.error("openInspectionModal error", e);
       alert(
         e?.message ||
-          "Could not load template definition for this inspection."
+          "Could not load template definition. Check the templates table schema."
       );
+      setModalOpen(false);
       setActiveInspection(null);
     } finally {
       setModalLoading(false);
     }
   };
 
-    const closeInspectionModal = () => {
+  const closeInspectionModal = () => {
+    setModalOpen(false);
     setActiveInspection(null);
     setActiveDefinition(null);
     setTemplateLogo(null);
@@ -271,471 +357,574 @@ export default function InspectionsPage() {
     setModalSaving(false);
   };
 
-  // ------------------------------
-  // Answer helpers
-  // ------------------------------
+  // --------------------------
+  // Update answers state
+  // --------------------------
   const updateAnswer = (
-    questionId: string,
-    patch: Partial<InspectionAnswer>
+    index: number,
+    patch: Partial<ModalAnswer>
   ) => {
     setAnswers((prev) =>
-      prev.map((a) =>
-        a.questionId === questionId ? { ...a, ...patch } : a
-      )
+      prev.map((a, i) => (i === index ? { ...a, ...patch } : a))
     );
   };
 
-  const addPhotoToAnswer = (questionId: string, file: File | null) => {
+  const handlePhotoChange = (index: number, file: File | null) => {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
+      const url = String(reader.result);
       setAnswers((prev) =>
-        prev.map((a) =>
-          a.questionId === questionId
-            ? {
-                ...a,
-                photos: [...(a.photos || []), String(reader.result)],
-              }
-            : a
+        prev.map((a, i) =>
+          i === index ? { ...a, photos: [...a.photos, url] } : a
         )
       );
     };
     reader.readAsDataURL(file);
   };
 
-  // ------------------------------
-  // Score calculation (simple)
-  // ------------------------------
-  const calculateScore = (
-    def: TemplateDefinition | null,
-    ans: InspectionAnswer[]
-  ): number | null => {
-    if (!def) return null;
+  // --------------------------
+  // Save (in_progress) or complete
+  // --------------------------
+  const computeScore = (items: InspectionItem[]): number | null => {
+    const scored = items.filter((it) =>
+      it.type === "yes_no_na" || it.type === "good_fair_poor"
+    );
+    if (!scored.length) return null;
+
     let total = 0;
-    let positive = 0;
+    let max = 0;
 
-    for (const sec of def.sections || []) {
-      for (const q of sec.questions || []) {
-        const a = ans.find((x) => x.questionId === q.id);
-        if (!a || a.value == null) continue;
+    for (const it of scored) {
+      if (it.type === "yes_no_na") {
+        max += 1;
+        if (it.choice_key === "yes") total += 1;
+        if (it.choice_key === "no") total += 0;
+        if (it.choice_key === "na") {
+          max -= 1; // exclude N/A from denominator
+        }
+      } else if (it.type === "good_fair_poor") {
+        max += 2;
+        if (it.choice_key === "good") total += 2;
+        if (it.choice_key === "fair") total += 1;
+        if (it.choice_key === "poor") total += 0;
+      }
+    }
 
-        if (q.type === "yes_no_na") {
-          total += 1;
-          if (a.value === "yes") positive += 1;
-        } else if (q.type === "good_fair_poor") {
-          total += 1;
-          if (a.value === "good") positive += 1;
+    if (max <= 0) return null;
+    return Math.round((total / max) * 100);
+  };
+
+  const buildItemsFromAnswers = (): InspectionItem[] => {
+    return answers.map((a) => ({
+      section_id: a.section_id,
+      section_title: a.section_title,
+      question_id: a.question_id,
+      question_label: a.question_label,
+      type: a.type,
+      value: a.value,
+      choice_key: a.choice_key,
+      choice_label: a.choice_label,
+      notes: a.notes,
+      photos: a.photos,
+      required: a.required,
+    }));
+  };
+
+  const saveInspection = async (markComplete: boolean) => {
+    if (!activeInspection) return;
+    setModalSaving(true);
+    try {
+      const items = buildItemsFromAnswers();
+
+      if (markComplete) {
+        // validate required
+        const missingRequired = items.some((it) => {
+          if (!it.required) return false;
+          if (it.type === "text") {
+            return !it.value || it.value.trim() === "";
+          }
+          // choice-based
+          return !it.choice_key;
+        });
+        if (missingRequired) {
+          alert("Please complete all required questions before completing.");
+          setModalSaving(false);
+          return;
         }
       }
-    }
 
-    if (total === 0) return null;
-    return Math.round((positive / total) * 100);
-  };
+      const score = computeScore(items);
+      const nowIso = new Date().toISOString();
+      const newStatus: Status = markComplete
+        ? "completed"
+        : "in_progress";
 
-  // ------------------------------
-  // Save progress (keep in_progress)
-  // ------------------------------
-  const saveProgress = async () => {
-    if (!activeInspection) return;
-    if (!activeDefinition) return;
-    setModalSaving(true);
-    try {
-      const score = calculateScore(activeDefinition, answers);
       const { error } = await supabase
         .from("inspections")
         .update({
-          items: answers,
-          status: "in_progress",
-          submitted_at: null,
+          items,
           score,
+          status: newStatus,
+          submitted_at: markComplete
+            ? nowIso
+            : activeInspection.submitted_at,
         })
         .eq("id", activeInspection.id);
 
       if (error) throw error;
 
       await loadInspections();
-      alert("Progress saved.");
-    } catch (e: any) {
-      console.error("saveProgress error", e);
-      alert(e?.message || "Could not save progress.");
-    } finally {
-      setModalSaving(false);
-    }
-  };
-
-  // ------------------------------
-  // Complete inspection
-  // ------------------------------
-  const completeInspection = async () => {
-    if (!activeInspection) return;
-    if (!activeDefinition) return;
-
-    if (
-      !confirm(
-        "Mark this inspection as complete? You can still view it later but it will move to 'Completed'."
-      )
-    ) {
-      return;
-    }
-
-    setModalSaving(true);
-    try {
-      const score = calculateScore(activeDefinition, answers);
-      const { error } = await supabase
-        .from("inspections")
-        .update({
-          items: answers,
-          status: "submitted",
-          submitted_at: new Date().toISOString(),
-          score,
-        })
-        .eq("id", activeInspection.id);
-
-      if (error) throw error;
-
-      await loadInspections();
-      alert("Inspection completed.");
-      closeInspectionModal();
-    } catch (e: any) {
-      console.error("completeInspection error", e);
-      alert(e?.message || "Could not complete inspection.");
-    } finally {
-      setModalSaving(false);
-    }
-  };
-
-  // ------------------------------
-  // Delete inspection (single)
-  // ------------------------------
-  const canDeleteInspection = (insp: InspectionRow): boolean => {
-    if (isAdmin) return true;
-    if (!currentUserId) return false;
-    return insp.status === "in_progress" && insp.owner_user_id === currentUserId;
-  };
-
-  const deleteInspection = async (insp: InspectionRow) => {
-    if (!canDeleteInspection(insp)) {
-      alert("You are not allowed to delete this inspection.");
-      return;
-    }
-
-    if (
-      !confirm(
-        `Delete inspection "${insp.template_name}"? This cannot be undone.`
-      )
-    ) {
-      return;
-    }
-
-    try {
-      const { error } = await supabase
-        .from("inspections")
-        .delete()
-        .eq("id", insp.id);
-
-      if (error) throw error;
-
-      await loadInspections();
-      if (activeInspection && activeInspection.id === insp.id) {
+      if (markComplete) {
+        alert("Inspection completed.");
         closeInspectionModal();
+      } else {
+        alert("Inspection saved.");
       }
-      alert("Inspection deleted.");
     } catch (e: any) {
-      console.error("deleteInspection error", e);
-      alert(e?.message || "Could not delete inspection.");
+      console.error("saveInspection error", e);
+      alert(e?.message || "Could not save inspection.");
+    } finally {
+      setModalSaving(false);
     }
   };
 
-  // ------------------------------
-  // Bulk delete (admin only)
-  // ------------------------------
+  // --------------------------
+  // Single export to PDF (from modal) with logo
+  // --------------------------
+  const exportCurrentToPdf = () => {
+    if (!activeInspection || !activeDefinition) return;
+
+    const doc = new jsPDF("p", "mm", "a4");
+    let y = 15;
+
+    // Logo
+    if (templateLogo) {
+      try {
+        // small square logo
+        doc.addImage(templateLogo, "PNG", 15, y - 5, 20, 20);
+        y += 20;
+      } catch (e) {
+        console.warn("Failed to add logo to PDF", e);
+      }
+    }
+
+    // Header text
+    doc.setFontSize(14);
+    doc.text(activeInspection.template_name, 15, y);
+    y += 7;
+
+    doc.setFontSize(10);
+    doc.text(`Site: ${activeInspection.site || "—"}`, 15, y);
+    y += 5;
+    doc.text(
+      `Started: ${formatDateTime(activeInspection.started_at)}`,
+      15,
+      y
+    );
+    y += 5;
+    if (activeInspection.submitted_at) {
+      doc.text(
+        `Submitted: ${formatDateTime(activeInspection.submitted_at)}`,
+        15,
+        y
+      );
+      y += 5;
+    }
+    if (activeInspection.owner_name) {
+      doc.text(`Inspector: ${activeInspection.owner_name}`, 15, y);
+      y += 5;
+    }
+    if (activeInspection.score !== null) {
+      doc.text(`Score: ${activeInspection.score}%`, 15, y);
+      y += 7;
+    }
+
+    y += 2;
+    doc.setLineWidth(0.2);
+    doc.line(15, y, 195, y);
+    y += 5;
+
+    const pageHeight = doc.internal.pageSize.getHeight();
+
+    const addTextWrapped = (text: string, x: number, yPos: number) => {
+      const maxWidth = 180; // mm
+      const lines = doc.splitTextToSize(text, maxWidth);
+      for (const line of lines) {
+        if (yPos > pageHeight - 15) {
+          doc.addPage();
+          yPos = 15;
+        }
+        doc.text(line, x, yPos);
+        yPos += 4;
+      }
+      return yPos;
+    };
+
+    // Build a lookup from answers
+    const answerByKey = new Map<string, ModalAnswer>();
+    for (const a of answers) {
+      answerByKey.set(`${a.section_id}:${a.question_id}`, a);
+    }
+
+    for (const section of activeDefinition.sections || []) {
+      if (y > pageHeight - 20) {
+        doc.addPage();
+        y = 15;
+      }
+      doc.setFontSize(11);
+      doc.setFont(undefined, "bold");
+      y = addTextWrapped(section.title || "Untitled section", 15, y);
+      doc.setFont(undefined, "normal");
+      y += 1;
+
+      for (const q of section.questions || []) {
+        const a =
+          answerByKey.get(`${section.id}:${q.id}`) ||
+          ({
+            value: null,
+            choice_label: null,
+            notes: null,
+            photos: [],
+          } as ModalAnswer);
+
+        if (y > pageHeight - 20) {
+          doc.addPage();
+          y = 15;
+        }
+
+        doc.setFontSize(10);
+        y = addTextWrapped(`• ${q.label}`, 17, y);
+
+        let ansLabel = "";
+        if (q.type === "text") {
+          ansLabel = a.value || "";
+        } else if (q.type === "multiple_choice") {
+          ansLabel = a.choice_label || "";
+        } else {
+          ansLabel = a.choice_label || "";
+        }
+        if (ansLabel) {
+          y = addTextWrapped(`Answer: ${ansLabel}`, 20, y);
+        }
+
+        if (a.notes) {
+          y = addTextWrapped(`Notes: ${a.notes}`, 20, y);
+        }
+
+        if (a.photos && a.photos.length > 0) {
+          y = addTextWrapped(
+            `Photos attached: ${a.photos.length}`,
+            20,
+            y
+          );
+        }
+
+        y += 3;
+      }
+
+      y += 2;
+    }
+
+    doc.save(
+      `inspection-${activeInspection.template_name
+        .replace(/[^a-z0-9]+/gi, "-")
+        .toLowerCase()}-${activeInspection.id}.pdf`
+    );
+  };
+
+  // --------------------------
+  // Bulk delete (admin)
+  // --------------------------
   const bulkDeleteSelected = async () => {
-    if (!selectedIds.length) return;
     if (!isAdmin) {
-      alert("Only admins can bulk delete inspections.");
+      alert("Only admins can delete inspections.");
       return;
     }
+    if (!selectedIds.length) return;
+
     if (
       !confirm(
-        `Delete ${selectedIds.length} inspections? This cannot be undone.`
+        `Delete ${selectedIds.length} inspection(s)? This cannot be undone.`
       )
     ) {
       return;
     }
+
+    setBulkBusy(true);
     try {
       const { error } = await supabase
         .from("inspections")
         .delete()
         .in("id", selectedIds);
       if (error) throw error;
-
       await loadInspections();
+      clearSelection();
       alert("Selected inspections deleted.");
     } catch (e: any) {
       console.error("bulkDeleteSelected error", e);
-      alert(e?.message || "Could not bulk delete inspections.");
+      alert(e?.message || "Could not delete inspections.");
+    } finally {
+      setBulkBusy(false);
     }
   };
 
-  // ------------------------------
-  // Bulk download selected as single PDF
-  // ------------------------------
-  const downloadSelectedAsPdf = async () => {
+  // --------------------------
+  // Bulk PDF export
+  // --------------------------
+  const bulkDownloadSelected = async () => {
     if (!selectedIds.length) {
-      alert("Select at least one inspection first.");
+      alert("Select some inspections first.");
       return;
     }
 
+    setBulkBusy(true);
     try {
-      const selected = inspections.filter((i) =>
+      const targets = inspections.filter((i) =>
         selectedIds.includes(i.id)
       );
-      if (!selected.length) {
-        alert("No matching inspections found.");
-        return;
-      }
 
-      // Fetch template definitions for all template_ids involved
-      const templateIds = Array.from(
-        new Set(selected.map((i) => i.template_id))
-      );
-      const { data: templatesData, error } = await supabase
-        .from("templates")
-        .select("id, definition")
-        .in("id", templateIds);
-
-      if (error) throw error;
-
-      const defMap = new Map<string, TemplateDefinition>();
-      (templatesData || []).forEach((t: any) => {
-        const def: TemplateDefinition =
-          (t.definition as TemplateDefinition) || { sections: [] };
-        defMap.set(t.id, def);
-      });
-
-      const doc = new jsPDF();
-      doc.setFont("helvetica", "normal");
-
-      selected.forEach((insp, idx) => {
-        if (idx > 0) {
-          doc.addPage();
+      for (const insp of targets) {
+        // fetch template + logo + definition
+        const { data: tpl, error: tplErr } = await supabase
+          .from("templates")
+          .select("definition, logo_data_url")
+          .eq("id", insp.template_id)
+          .single();
+        if (tplErr) {
+          console.error("Template fetch error for bulk PDF", tplErr);
+          continue;
         }
 
-        const def = defMap.get(insp.template_id) || { sections: [] };
-        const items = (insp.items || []) as InspectionAnswer[];
+        const def: TemplateDefinition =
+          (tpl?.definition as TemplateDefinition) || { sections: [] };
+        const logo = (tpl as any)?.logo_data_url as
+          | string
+          | null
+          | undefined;
 
-        let y = 10;
+        const items: InspectionItem[] = insp.items || [];
+
+        const doc = new jsPDF("p", "mm", "a4");
+        let y = 15;
+
+        if (logo) {
+          try {
+            doc.addImage(logo, "PNG", 15, y - 5, 20, 20);
+            y += 20;
+          } catch (e) {
+            console.warn("Failed to add logo to bulk PDF", e);
+          }
+        }
+
         doc.setFontSize(14);
-        doc.text(`Inspection: ${insp.template_name}`, 10, y);
-        y += 6;
+        doc.text(insp.template_name, 15, y);
+        y += 7;
 
         doc.setFontSize(10);
-        doc.text(`Site: ${insp.site || "—"}`, 10, y);
+        doc.text(`Site: ${insp.site || "—"}`, 15, y);
         y += 5;
         doc.text(
-          `Started: ${insp.started_at || "—"}`,
-          10,
+          `Started: ${formatDateTime(insp.started_at)}`,
+          15,
           y
         );
         y += 5;
-        doc.text(
-          `Submitted: ${insp.submitted_at || "—"}`,
-          10,
-          y
-        );
-        y += 5;
-        doc.text(
-          `By: ${insp.owner_name || "Unknown"} • Status: ${
-            insp.status === "in_progress" ? "In progress" : "Completed"
-          }${typeof insp.score === "number" ? ` • Score: ${insp.score}%` : ""}`,
-          10,
-          y
-        );
-        y += 8;
+        if (insp.submitted_at) {
+          doc.text(
+            `Submitted: ${formatDateTime(insp.submitted_at)}`,
+            15,
+            y
+          );
+          y += 5;
+        }
+        if (insp.owner_name) {
+          doc.text(`Inspector: ${insp.owner_name}`, 15, y);
+          y += 5;
+        }
+        if (insp.score !== null) {
+          doc.text(`Score: ${insp.score}%`, 15, y);
+          y += 7;
+        }
 
-        // For each section/question
-        for (const sec of def.sections || []) {
-          if (y > 270) {
+        y += 2;
+        doc.setLineWidth(0.2);
+        doc.line(15, y, 195, y);
+        y += 5;
+
+        const pageHeight = doc.internal.pageSize.getHeight();
+
+        const addTextWrapped = (text: string, x: number, yPos: number) => {
+          const maxWidth = 180;
+          const lines = doc.splitTextToSize(text, maxWidth);
+          for (const line of lines) {
+            if (yPos > pageHeight - 15) {
+              doc.addPage();
+              yPos = 15;
+            }
+            doc.text(line, x, yPos);
+            yPos += 4;
+          }
+          return yPos;
+        };
+
+        // Build quick lookup
+        const itemsByKey = new Map<string, InspectionItem>();
+        for (const it of items) {
+          itemsByKey.set(`${it.section_id}:${it.question_id}`, it);
+        }
+
+        for (const section of def.sections || []) {
+          if (y > pageHeight - 20) {
             doc.addPage();
-            y = 10;
+            y = 15;
           }
           doc.setFontSize(11);
-          doc.text(`Section: ${sec.title}`, 10, y);
-          y += 5;
+          doc.setFont(undefined, "bold");
+          y = addTextWrapped(section.title || "Untitled section", 15, y);
+          doc.setFont(undefined, "normal");
+          y += 1;
 
-          for (const q of sec.questions || []) {
-            if (y > 270) {
+          for (const q of section.questions || []) {
+            const it =
+              itemsByKey.get(`${section.id}:${q.id}`) ||
+              ({
+                value: null,
+                choice_label: null,
+                notes: null,
+                photos: [],
+              } as InspectionItem);
+
+            if (y > pageHeight - 20) {
               doc.addPage();
-              y = 10;
+              y = 15;
             }
-
-            const ans = items.find((a) => a.questionId === q.id);
 
             doc.setFontSize(10);
-            const qText = `Q: ${q.label}`;
-            doc.text(qText, 10, y);
-            y += 4;
+            y = addTextWrapped(`• ${q.label}`, 17, y);
 
-            const v = ans?.value || "";
-            if (v) {
-              doc.text(`Answer: ${v}`, 14, y);
-              y += 4;
+            let ansLabel = "";
+            if (q.type === "text") {
+              ansLabel = it.value || "";
+            } else if (q.type === "multiple_choice") {
+              ansLabel = it.choice_label || "";
+            } else {
+              ansLabel = it.choice_label || "";
+            }
+            if (ansLabel) {
+              y = addTextWrapped(`Answer: ${ansLabel}`, 20, y);
             }
 
-            if (ans?.notes) {
-              const notesLines = doc.splitTextToSize(
-                `Notes: ${ans.notes}`,
-                180
-              );
-              doc.text(notesLines, 14, y);
-              y += 4 + (notesLines.length - 1) * 4;
+            if (it.notes) {
+              y = addTextWrapped(`Notes: ${it.notes}`, 20, y);
             }
-
-            // We won't embed photos (too heavy); just mention count
-            if (ans?.photos && ans.photos.length > 0) {
-              doc.text(
-                `Photos attached: ${ans.photos.length}`,
-                14,
+            if (it.photos && it.photos.length > 0) {
+              y = addTextWrapped(
+                `Photos attached: ${it.photos.length}`,
+                20,
                 y
               );
-              y += 4;
             }
-
-            y += 2;
+            y += 3;
           }
 
-          y += 3;
+          y += 2;
         }
-      });
 
-      doc.save("auditking-inspections.pdf");
+        doc.save(
+          `inspection-${insp.template_name
+            .replace(/[^a-z0-9]+/gi, "-")
+            .toLowerCase()}-${insp.id}.pdf`
+        );
+      }
     } catch (e: any) {
-      console.error("downloadSelectedAsPdf error", e);
-      alert(
-        e?.message ||
-          "Could not generate PDF. Check that jspdf is installed."
-      );
+      console.error("bulkDownloadSelected error", e);
+      alert(e?.message || "Could not download PDFs.");
+    } finally {
+      setBulkBusy(false);
     }
   };
 
-  // ------------------------------
-  // Helpers
-  // ------------------------------
-  const formatDate = (iso: string | null) => {
-    if (!iso) return "—";
-    try {
-      return new Date(iso).toLocaleString();
-    } catch {
-      return iso;
-    }
-  };
-
-  const statusBadge = (status: InspectionStatus) => {
-    const base =
-      "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium";
-    if (status === "in_progress") {
-      return (
-        <span className={`${base} bg-amber-100 text-amber-800`}>
-          In progress
-        </span>
-      );
-    }
-    return (
-      <span className={`${base} bg-emerald-100 text-emerald-800`}>
-        Completed
-      </span>
-    );
-  };
-
-  // ------------------------------
+  // --------------------------
   // Render
-  // ------------------------------
+  // --------------------------
   return (
     <div className="max-w-6xl mx-auto py-6 space-y-4">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-purple-700">Inspections</h1>
-          {roleLoading ? (
-            <p className="text-xs text-gray-500">Checking permissions…</p>
-          ) : (
-            <p className="text-sm text-gray-600">
-              Start, resume and review inspections. Use the popup to answer
-              questions and save progress. Use checkboxes to select multiple
-              inspections for bulk PDF export or (for admins) bulk delete.
+          <h1 className="text-2xl font-bold text-purple-700">
+            Inspections
+          </h1>
+          <p className="text-sm text-gray-600">
+            Start, continue and complete inspections. Save in progress and
+            export branded PDF reports.
+          </p>
+          {!roleLoading && !canSeeAll && (
+            <p className="text-[11px] text-gray-400 mt-1">
+              You are an inspector – you’ll only see inspections you own.
             </p>
           )}
         </div>
 
-        <div className="flex flex-col items-end gap-2">
-          <div className="flex gap-2 text-xs">
-            <button
-              onClick={() => setFilterStatus("all")}
-              className={`px-3 py-1 rounded-xl border ${
-                filterStatus === "all"
-                  ? "bg-purple-700 text-white border-purple-700"
-                  : "bg-white text-gray-700 hover:bg-gray-50"
-              }`}
+        <div className="space-y-2 text-xs">
+          <div className="flex flex-wrap gap-2 items-center">
+            <span className="text-gray-500">Filter by site:</span>
+            <select
+              value={selectedSiteId}
+              onChange={(e) => setSelectedSiteId(e.target.value)}
+              className="border rounded-xl px-3 py-1"
             >
-              All
-            </button>
-            <button
-              onClick={() => setFilterStatus("in_progress")}
-              className={`px-3 py-1 rounded-xl border ${
-                filterStatus === "in_progress"
-                  ? "bg-purple-700 text-white border-purple-700"
-                  : "bg-white text-gray-700 hover:bg-gray-50"
-              }`}
+              <option value="all">All sites</option>
+              {sites.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+
+            <span className="text-gray-500 ml-2">Status:</span>
+            <select
+              value={statusFilter}
+              onChange={(e) =>
+                setStatusFilter(e.target.value as "all" | Status)
+              }
+              className="border rounded-xl px-3 py-1"
             >
-              In progress
-            </button>
-            <button
-              onClick={() => setFilterStatus("submitted")}
-              className={`px-3 py-1 rounded-xl border ${
-                filterStatus === "submitted"
-                  ? "bg-purple-700 text-white border-purple-700"
-                  : "bg-white text-gray-700 hover:bg-gray-50"
-              }`}
-            >
-              Completed
-            </button>
+              <option value="all">All</option>
+              <option value="in_progress">In progress</option>
+              <option value="completed">Completed</option>
+            </select>
           </div>
 
-          {/* Bulk actions summary */}
-          {selectedIds.length > 0 && (
-            <div className="flex items-center gap-2 text-[11px] bg-purple-50 border border-purple-100 rounded-xl px-3 py-1">
-              <span className="text-purple-800">
-                {selectedIds.length} selected
-              </span>
+          <div className="flex flex-wrap gap-2 items-center">
+            <label className="inline-flex items-center gap-1">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={toggleSelectAllVisible}
+              />
+              <span>Select all visible</span>
+            </label>
+            <span className="text-gray-400">
+              Selected: {selectedIds.length}
+            </span>
+            <button
+              onClick={bulkDownloadSelected}
+              disabled={!selectedIds.length || bulkBusy}
+              className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50 disabled:opacity-50"
+            >
+              Download PDFs
+            </button>
+            {isAdmin && (
               <button
-                onClick={selectAllVisible}
-                className="underline text-purple-700"
+                onClick={bulkDeleteSelected}
+                disabled={!selectedIds.length || bulkBusy}
+                className="px-3 py-1 rounded-xl border text-xs text-rose-600 hover:bg-rose-50 disabled:opacity-50"
               >
-                Select visible
+                Delete selected
               </button>
-              <button
-                onClick={clearSelection}
-                className="underline text-gray-500"
-              >
-                Clear
-              </button>
-              <span className="mx-1 text-gray-300">|</span>
-              <button
-                onClick={downloadSelectedAsPdf}
-                className="text-purple-700 underline"
-              >
-                Download PDF
-              </button>
-              {isAdmin && (
-                <button
-                  onClick={bulkDeleteSelected}
-                  className="text-rose-600 underline"
-                >
-                  Delete selected
-                </button>
-              )}
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </div>
 
@@ -754,296 +943,279 @@ export default function InspectionsPage() {
           No inspections found.
         </div>
       ) : (
-        <div className="space-y-2">
-          {filteredInspections.map((insp) => (
-            <div
-              key={insp.id}
-              className="border rounded-2xl bg-white p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-2 shadow-sm"
-            >
-              <div className="flex items-start gap-3 flex-1">
-                <input
-                  type="checkbox"
-                  className="mt-1"
-                  checked={selectedIds.includes(insp.id)}
-                  onChange={() => toggleSelected(insp.id)}
-                />
-                <div className="space-y-1 text-sm">
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold text-gray-900">
-                      {insp.template_name}
-                    </span>
-                    {statusBadge(insp.status)}
-                  </div>
-                  <div className="text-xs text-gray-600">
-                    Site: {insp.site || "—"}
-                    {" • "}
-                    Started: {formatDate(insp.started_at)}
-                    {" • "}
-                    Completed: {formatDate(insp.submitted_at)}
-                  </div>
-                  <div className="text-xs text-gray-500">
-                    By: {insp.owner_name || "Unknown"}
-                    {typeof insp.score === "number" && (
-                      <> • Score: {insp.score}%</>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2 text-xs">
-                <button
-                  onClick={() => openInspectionModal(insp)}
-                  className="px-3 py-1 rounded-xl border hover:bg-gray-50"
-                >
-                  {insp.status === "in_progress" ? "Resume" : "View"}
-                </button>
-                {canDeleteInspection(insp) && (
-                  <button
-                    onClick={() => deleteInspection(insp)}
-                    className="px-3 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
-                  >
-                    Delete
-                  </button>
-                )}
+        <div className="space-y-4">
+          {/* In progress */}
+          {inProgress.length > 0 && (
+            <div className="space-y-2">
+              <h2 className="text-sm font-semibold text-gray-700">
+                In progress
+              </h2>
+              <div className="space-y-2">
+                {inProgress.map((insp) => (
+                  <InspectionRowCard
+                    key={insp.id}
+                    insp={insp}
+                    siteName={siteNameFor(insp.site_id)}
+                    selected={selectedIds.includes(insp.id)}
+                    onToggleSelected={() => toggleSelected(insp.id)}
+                    onOpen={() => openInspectionModal(insp)}
+                    onDeleted={loadInspections}
+                    isAdmin={isAdmin}
+                  />
+                ))}
               </div>
             </div>
-          ))}
+          )}
+
+          {/* Completed */}
+          {completed.length > 0 && (
+            <div className="space-y-2">
+              <h2 className="text-sm font-semibold text-gray-700">
+                Completed
+              </h2>
+              <div className="space-y-2">
+                {completed.map((insp) => (
+                  <InspectionRowCard
+                    key={insp.id}
+                    insp={insp}
+                    siteName={siteNameFor(insp.site_id)}
+                    selected={selectedIds.includes(insp.id)}
+                    onToggleSelected={() => toggleSelected(insp.id)}
+                    onOpen={() => openInspectionModal(insp)}
+                    onDeleted={loadInspections}
+                    isAdmin={isAdmin}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Inspection modal */}
-      {activeInspection && (
+      {/* Modal */}
+      {modalOpen && activeInspection && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-full max-w-4xl rounded-2xl bg-white p-5 shadow-xl max-h-[90vh] overflow-auto space-y-4">
-            <div className="flex items-center justify-between gap-2">
-              <div>
-                <h2 className="font-semibold text-lg text-gray-900">
-                  {activeInspection.template_name}
-                </h2>
-                <p className="text-xs text-gray-500">
-                  Site: {activeInspection.site || "—"} • Started:{" "}
-                  {formatDate(activeInspection.started_at)}
-                </p>
-              </div>
-              <button
-                onClick={closeInspectionModal}
-                className="text-sm text-gray-500 hover:text-gray-800"
-              >
-                Close
-              </button>
-            </div>
-
-            {modalLoading || !activeDefinition ? (
-              <div className="border rounded-xl p-4 text-sm text-gray-600">
-                Loading questions…
+          <div className="w-full max-w-5xl max-h-[90vh] overflow-auto rounded-2xl bg-white shadow-xl p-5 space-y-4">
+            {modalLoading ? (
+              <div className="text-sm text-gray-600">Loading…</div>
+            ) : !activeDefinition ? (
+              <div className="text-sm text-gray-600">
+                Could not load template definition.
               </div>
             ) : (
               <>
-                {/* Sections and questions */}
-                <div className="space-y-4 text-sm">
-                  {activeDefinition.sections.map((sec) => (
-                    <div
-                      key={sec.id}
-                      className="border rounded-2xl p-3 bg-gray-50 space-y-3"
-                    >
-                      <div className="flex items-center gap-3">
-                        {sec.image_data_url && (
-                          <img
-                            src={sec.image_data_url}
-                            alt={sec.title}
-                            className="h-10 w-10 object-cover rounded-md border bg-white"
-                          />
-                        )}
-                        <h3 className="font-semibold text-gray-900 text-sm">
-                          {sec.title}
-                        </h3>
-                      </div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-start gap-3">
+                    {templateLogo && (
+                      <img
+                        src={templateLogo}
+                        alt={activeInspection.template_name}
+                        className="h-10 w-10 object-cover rounded-md border bg-white flex-shrink-0"
+                      />
+                    )}
+                    <div>
+                      <h2 className="font-semibold text-lg text-gray-900">
+                        {activeInspection.template_name}
+                      </h2>
+                      <p className="text-xs text-gray-500">
+                        Site: {activeInspection.site || "—"} • Started:{" "}
+                        {formatDateTime(activeInspection.started_at)}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={closeInspectionModal}
+                    className="text-sm text-gray-500 hover:text-gray-800"
+                  >
+                    Close
+                  </button>
+                </div>
 
-                      <div className="space-y-2">
-                        {sec.questions.map((q) => {
-                          const ans =
-                            answers.find(
-                              (a) => a.questionId === q.id
-                            ) ||
-                            ({
-                              sectionId: sec.id,
-                              questionId: q.id,
-                              value: null,
-                              notes: "",
-                              photos: [],
-                            } as InspectionAnswer);
+                <div className="flex flex-col md:flex-row gap-4">
+                  <div className="flex-1 space-y-3">
+                    {activeDefinition.sections.map((section) => (
+                      <div
+                        key={section.id}
+                        className="border rounded-2xl p-3 bg-gray-50 space-y-3"
+                      >
+                        <div className="flex items-center gap-3">
+                          {section.image_data_url && (
+                            <img
+                              src={section.image_data_url}
+                              alt={section.title}
+                              className="h-8 w-8 object-cover rounded-md border bg-white"
+                            />
+                          )}
+                          <h3 className="text-sm font-semibold text-gray-800">
+                            {section.title}
+                          </h3>
+                        </div>
 
-                          return (
-                            <div
-                              key={q.id}
-                              className="border rounded-xl p-3 bg-white space-y-2"
-                            >
-                              <div className="flex items-start justify-between gap-2">
-                                <div>
-                                  <div className="font-medium text-gray-900 text-sm">
+                        <div className="space-y-2">
+                          {section.questions.map((q) => {
+                            const idx = answers.findIndex(
+                              (a) =>
+                                a.section_id === section.id &&
+                                a.question_id === q.id
+                            );
+                            if (idx === -1) return null;
+                            const a = answers[idx];
+
+                            return (
+                              <div
+                                key={q.id}
+                                className="border rounded-xl bg-white p-3 text-xs space-y-2"
+                              >
+                                <div className="flex justify-between items-start gap-2">
+                                  <div className="font-medium text-gray-800">
                                     {q.label}
+                                    {q.required && (
+                                      <span className="ml-2 text-[10px] text-rose-600">
+                                        (required)
+                                      </span>
+                                    )}
                                   </div>
-                                  {q.required && (
-                                    <div className="text-[11px] text-rose-600">
-                                      Required
-                                    </div>
-                                  )}
+                                  <div className="text-[10px] text-gray-400">
+                                    {q.type === "yes_no_na" &&
+                                      "Yes / No / N/A"}
+                                    {q.type === "good_fair_poor" &&
+                                      "Good / Fair / Poor"}
+                                    {q.type === "multiple_choice" &&
+                                      "Multiple choice"}
+                                    {q.type === "text" &&
+                                      "Text response"}
+                                  </div>
                                 </div>
+
+                                {/* Answer controls */}
                                 {q.type === "yes_no_na" && (
-                                  <div className="flex gap-2 text-xs">
-                                    <label className="inline-flex items-center gap-1">
-                                      <input
-                                        type="radio"
-                                        name={q.id}
-                                        checked={ans.value === "yes"}
-                                        onChange={() =>
-                                          updateAnswer(q.id, {
-                                            value: "yes",
-                                          })
-                                        }
-                                      />
-                                      Yes
-                                    </label>
-                                    <label className="inline-flex items-center gap-1">
-                                      <input
-                                        type="radio"
-                                        name={q.id}
-                                        checked={ans.value === "no"}
-                                        onChange={() =>
-                                          updateAnswer(q.id, {
-                                            value: "no",
-                                          })
-                                        }
-                                      />
-                                      No
-                                    </label>
-                                    <label className="inline-flex items-center gap-1">
-                                      <input
-                                        type="radio"
-                                        name={q.id}
-                                        checked={ans.value === "na"}
-                                        onChange={() =>
-                                          updateAnswer(q.id, {
-                                            value: "na",
-                                          })
-                                        }
-                                      />
-                                      N/A
-                                    </label>
-                                  </div>
-                                )}
-                                {q.type === "good_fair_poor" && (
-                                  <div className="flex gap-2 text-xs">
-                                    <label className="inline-flex items-center gap-1">
-                                      <input
-                                        type="radio"
-                                        name={q.id}
-                                        checked={ans.value === "good"}
-                                        onChange={() =>
-                                          updateAnswer(q.id, {
-                                            value: "good",
-                                          })
-                                        }
-                                      />
-                                      Good
-                                    </label>
-                                    <label className="inline-flex items-center gap-1">
-                                      <input
-                                        type="radio"
-                                        name={q.id}
-                                        checked={ans.value === "fair"}
-                                        onChange={() =>
-                                          updateAnswer(q.id, {
-                                            value: "fair",
-                                          })
-                                        }
-                                      />
-                                      Fair
-                                    </label>
-                                    <label className="inline-flex items-center gap-1">
-                                      <input
-                                        type="radio"
-                                        name={q.id}
-                                        checked={ans.value === "poor"}
-                                        onChange={() =>
-                                          updateAnswer(q.id, {
-                                            value: "poor",
-                                          })
-                                        }
-                                      />
-                                      Poor
-                                    </label>
-                                  </div>
-                                )}
-                                {q.type === "multiple_choice" && (
-                                  <select
-                                    value={ans.value || ""}
-                                    onChange={(e) =>
-                                      updateAnswer(q.id, {
-                                        value: e.target.value || null,
-                                      })
-                                    }
-                                    className="border rounded-xl px-3 py-1 text-xs"
-                                  >
-                                    <option value="">Select…</option>
-                                    {(q.options || []).map((opt) => (
-                                      <option key={opt} value={opt}>
-                                        {opt}
-                                      </option>
+                                  <div className="flex flex-wrap gap-3">
+                                    {[
+                                      { key: "yes", label: "Yes" },
+                                      { key: "no", label: "No" },
+                                      { key: "na", label: "N/A" },
+                                    ].map((opt) => (
+                                      <label
+                                        key={opt.key}
+                                        className="inline-flex items-center gap-1"
+                                      >
+                                        <input
+                                          type="radio"
+                                          name={`${section.id}-${q.id}`}
+                                          checked={
+                                            a.choice_key === opt.key
+                                          }
+                                          onChange={() =>
+                                            updateAnswer(idx, {
+                                              choice_key: opt.key,
+                                              choice_label: opt.label,
+                                              value: opt.label,
+                                            })
+                                          }
+                                        />
+                                        <span>{opt.label}</span>
+                                      </label>
                                     ))}
-                                  </select>
+                                  </div>
                                 )}
+
+                                {q.type === "good_fair_poor" && (
+                                  <div className="flex flex-wrap gap-3">
+                                    {[
+                                      { key: "good", label: "Good" },
+                                      { key: "fair", label: "Fair" },
+                                      { key: "poor", label: "Poor" },
+                                    ].map((opt) => (
+                                      <label
+                                        key={opt.key}
+                                        className="inline-flex items-center gap-1"
+                                      >
+                                        <input
+                                          type="radio"
+                                          name={`${section.id}-${q.id}`}
+                                          checked={
+                                            a.choice_key === opt.key
+                                          }
+                                          onChange={() =>
+                                            updateAnswer(idx, {
+                                              choice_key: opt.key,
+                                              choice_label: opt.label,
+                                              value: opt.label,
+                                            })
+                                          }
+                                        />
+                                        <span>{opt.label}</span>
+                                      </label>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {q.type === "multiple_choice" && (
+                                  <div className="flex flex-wrap gap-3">
+                                    {(q.options || []).map((opt) => (
+                                      <label
+                                        key={opt}
+                                        className="inline-flex items-center gap-1"
+                                      >
+                                        <input
+                                          type="radio"
+                                          name={`${section.id}-${q.id}`}
+                                          checked={
+                                            a.choice_label === opt
+                                          }
+                                          onChange={() =>
+                                            updateAnswer(idx, {
+                                              choice_key: opt,
+                                              choice_label: opt,
+                                              value: opt,
+                                            })
+                                          }
+                                        />
+                                        <span>{opt}</span>
+                                      </label>
+                                    ))}
+                                  </div>
+                                )}
+
                                 {q.type === "text" && (
                                   <textarea
-                                    value={ans.value || ""}
+                                    value={a.value || ""}
                                     onChange={(e) =>
-                                      updateAnswer(q.id, {
+                                      updateAnswer(idx, {
                                         value: e.target.value,
                                       })
                                     }
-                                    className="border rounded-xl px-3 py-1 text-xs w-48 min-h-[60px]"
-                                    placeholder="Enter response…"
+                                    className="w-full border rounded-xl px-3 py-2 min-h-[60px]"
+                                    placeholder="Enter notes / description…"
                                   />
                                 )}
-                              </div>
 
-                              {/* Notes & photos */}
-                              <div className="grid md:grid-cols-2 gap-2 text-xs">
                                 {q.allowNotes && (
                                   <div>
                                     <label className="block text-[11px] text-gray-500 mb-1">
-                                      Notes
+                                      Extra notes
                                     </label>
                                     <textarea
-                                      value={ans.notes || ""}
+                                      value={a.notes || ""}
                                       onChange={(e) =>
-                                        updateAnswer(q.id, {
+                                        updateAnswer(idx, {
                                           notes: e.target.value,
                                         })
                                       }
-                                      className="w-full border rounded-xl px-3 py-1 min-h-[60px]"
-                                      placeholder="Add notes…"
+                                      className="w-full border rounded-xl px-3 py-1 min-h-[40px]"
+                                      placeholder="Optional notes…"
                                     />
                                   </div>
                                 )}
+
                                 {q.allowPhoto && (
-                                  <div>
+                                  <div className="space-y-1">
                                     <label className="block text-[11px] text-gray-500 mb-1">
                                       Photos
                                     </label>
                                     <div className="flex flex-wrap gap-2 items-center">
-                                      {(ans.photos || []).map(
-                                        (src, idx) => (
-                                          <img
-                                            key={idx}
-                                            src={src}
-                                            alt="evidence"
-                                            className="h-10 w-10 object-cover rounded-md border"
-                                          />
-                                        )
-                                      )}
-                                      <label className="inline-flex items-center gap-2 cursor-pointer">
-                                        <span className="px-2 py-1 border rounded-xl hover:bg-gray-50">
+                                      <label className="inline-flex items-center gap-2 cursor-pointer text-[11px]">
+                                        <span className="px-2 py-1 border rounded-xl bg-white hover:bg-gray-50">
                                           Add photo
                                         </span>
                                         <input
@@ -1051,8 +1223,8 @@ export default function InspectionsPage() {
                                           accept="image/*"
                                           className="hidden"
                                           onChange={(e) =>
-                                            addPhotoToAnswer(
-                                              q.id,
+                                            handlePhotoChange(
+                                              idx,
                                               e.target.files
                                                 ? e.target.files[0]
                                                 : null
@@ -1060,57 +1232,74 @@ export default function InspectionsPage() {
                                           }
                                         />
                                       </label>
+                                      {a.photos.map((p, pIndex) => (
+                                        <img
+                                          key={pIndex}
+                                          src={p}
+                                          alt="evidence"
+                                          className="h-10 w-10 object-cover rounded-md border bg-gray-100"
+                                        />
+                                      ))}
                                     </div>
                                   </div>
                                 )}
                               </div>
-                            </div>
-                          );
-                        })}
+                            );
+                          })}
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Actions */}
-                <div className="flex items-center justify-between pt-2">
-                  <div className="text-xs text-gray-500">
-                    Status:{" "}
-                    {activeInspection.status === "in_progress"
-                      ? "In progress"
-                      : "Completed"}
-                    {typeof activeInspection.score === "number" && (
-                      <> • Score: {activeInspection.score}%</>
-                    )}
+                    ))}
                   </div>
-                  <div className="flex gap-2 text-sm">
-                    <button
-                      onClick={saveProgress}
-                      disabled={modalSaving}
-                      className="px-3 py-2 rounded-xl border hover:bg-gray-50 disabled:opacity-50"
-                    >
-                      Save progress
-                    </button>
-                    {activeInspection.status === "in_progress" && (
-                      <button
-                        onClick={completeInspection}
-                        disabled={modalSaving}
-                        className="px-3 py-2 rounded-xl bg-purple-700 text-white hover:bg-purple-800 disabled:opacity-50"
-                      >
-                        Complete
-                      </button>
-                    )}
-                    {activeInspection &&
-                      canDeleteInspection(activeInspection) &&
-                      (
-                        <button
-                          onClick={() => deleteInspection(activeInspection)}
-                          disabled={modalSaving}
-                          className="px-3 py-2 rounded-xl border text-rose-600 hover:bg-rose-50 disabled:opacity-50"
-                        >
-                          Delete
-                        </button>
+
+                  {/* Side panel */}
+                  <div className="w-full md:w-64 space-y-3 text-xs">
+                    <div className="border rounded-2xl p-3 bg-gray-50 space-y-1">
+                      <div className="font-semibold text-gray-800">
+                        Summary
+                      </div>
+                      <div className="text-gray-600">
+                        Status:{" "}
+                        <span className="font-medium">
+                          {activeInspection.status === "completed"
+                            ? "Completed"
+                            : "In progress"}
+                        </span>
+                      </div>
+                      {activeInspection.score !== null && (
+                        <div className="text-gray-600">
+                          Score:{" "}
+                          <span className="font-medium">
+                            {activeInspection.score}%
+                          </span>
+                        </div>
                       )}
+                    </div>
+
+                    <div className="border rounded-2xl p-3 bg-gray-50 space-y-2">
+                      <div className="font-semibold text-gray-800">
+                        Actions
+                      </div>
+                      <button
+                        onClick={() => saveInspection(false)}
+                        disabled={modalSaving}
+                        className="w-full px-3 py-2 rounded-xl border bg-white hover:bg-gray-100 disabled:opacity-50"
+                      >
+                        Save progress
+                      </button>
+                      <button
+                        onClick={() => saveInspection(true)}
+                        disabled={modalSaving}
+                        className="w-full px-3 py-2 rounded-xl bg-purple-700 text-white hover:bg-purple-800 disabled:opacity-50"
+                      >
+                        Mark as complete
+                      </button>
+                      <button
+                        onClick={exportCurrentToPdf}
+                        className="w-full px-3 py-2 rounded-xl border bg-white hover:bg-gray-100"
+                      >
+                        Download PDF
+                      </button>
+                    </div>
                   </div>
                 </div>
               </>
@@ -1118,6 +1307,116 @@ export default function InspectionsPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// --------------------------
+// Row component
+// --------------------------
+type InspectionRowCardProps = {
+  insp: InspectionRow;
+  siteName: string;
+  selected: boolean;
+  onToggleSelected: () => void;
+  onOpen: () => void;
+  onDeleted: () => void;
+  isAdmin: boolean;
+};
+
+function InspectionRowCard({
+  insp,
+  siteName,
+  selected,
+  onToggleSelected,
+  onOpen,
+  onDeleted,
+  isAdmin,
+}: InspectionRowCardProps) {
+  const deleteOne = async () => {
+    if (!isAdmin) {
+      alert("Only admins can delete inspections.");
+      return;
+    }
+    if (!confirm("Delete this inspection? This cannot be undone.")) {
+      return;
+    }
+    try {
+      const { error } = await supabase
+        .from("inspections")
+        .delete()
+        .eq("id", insp.id);
+      if (error) throw error;
+      onDeleted();
+    } catch (e: any) {
+      console.error("delete inspection error", e);
+      alert(e?.message || "Could not delete inspection.");
+    }
+  };
+
+  const statusLabel =
+    insp.status === "completed" ? "Completed" : "In progress";
+  const statusColor =
+    insp.status === "completed"
+      ? "bg-emerald-50 text-emerald-700 border-emerald-100"
+      : "bg-amber-50 text-amber-700 border-amber-100";
+
+  return (
+    <div className="border rounded-2xl bg-white p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-2 shadow-sm">
+      <div className="flex items-start gap-3 flex-1">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggleSelected}
+          className="mt-1"
+        />
+        <div className="space-y-1 text-sm">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-gray-900">
+              {insp.template_name}
+            </span>
+            <span
+              className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] ${statusColor}`}
+            >
+              {statusLabel}
+            </span>
+            <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-700 px-2 py-0.5 text-[11px]">
+              {siteName}
+            </span>
+          </div>
+          <div className="text-[11px] text-gray-500 space-x-2">
+            <span>
+              Started: {formatDateTime(insp.started_at)}
+            </span>
+            {insp.submitted_at && (
+              <span>• Submitted: {formatDateTime(insp.submitted_at)}</span>
+            )}
+            {insp.owner_name && (
+              <span>• Inspector: {insp.owner_name}</span>
+            )}
+            {insp.score !== null && (
+              <span>• Score: {insp.score}%</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 text-xs">
+        <button
+          onClick={onOpen}
+          className="px-3 py-1 rounded-xl border hover:bg-gray-50"
+        >
+          {insp.status === "in_progress" ? "Continue" : "View"}
+        </button>
+        {isAdmin && (
+          <button
+            onClick={deleteOne}
+            className="px-3 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
+          >
+            Delete
+          </button>
+        )}
+      </div>
     </div>
   );
 }
