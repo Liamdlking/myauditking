@@ -33,6 +33,7 @@ type TemplateRow = {
   site_id: string | null;
   definition: TemplateDefinition;
   updated_at: string | null;
+  logo_data_url?: string | null;
 };
 
 type SiteRow = {
@@ -135,7 +136,9 @@ export default function TemplatesPage() {
     try {
       const { data, error } = await supabase
         .from("templates")
-        .select("id, name, description, site_id, definition, updated_at")
+        .select(
+          "id, name, description, site_id, definition, updated_at, logo_data_url"
+        )
         .order("name", { ascending: true });
 
       if (error) throw error;
@@ -148,6 +151,7 @@ export default function TemplatesPage() {
         definition:
           (t.definition as TemplateDefinition) || { sections: [] },
         updated_at: t.updated_at || null,
+        logo_data_url: t.logo_data_url || null,
       }));
 
       setTemplates(mapped);
@@ -199,7 +203,6 @@ export default function TemplatesPage() {
 
     setStarting(tpl.id);
     try {
-      // Get site name for convenience
       const site = sites.find((s) => s.id === tpl.site_id);
       const siteName = site?.name || null;
 
@@ -288,6 +291,7 @@ export default function TemplatesPage() {
       site_id: null,
       definition: { sections: [] },
       updated_at: null,
+      logo_data_url: null,
     };
     setEditorInitial(empty);
     setEditorOpen(true);
@@ -314,7 +318,7 @@ export default function TemplatesPage() {
             <p className="text-xs text-gray-500">Checking permissions…</p>
           ) : (
             <p className="text-sm text-gray-600">
-              Build structured checklists with sections, images and
+              Build structured checklists with sections, logos, images and
               multiple-choice questions. Assign them to sites so your teams
               can start inspections quickly.
             </p>
@@ -370,29 +374,38 @@ export default function TemplatesPage() {
               key={tpl.id}
               className="border rounded-2xl bg-white p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-2 shadow-sm"
             >
-              <div className="space-y-1 text-sm">
-                <div className="flex items-center gap-2">
-                  <span className="font-semibold text-gray-900">
-                    {tpl.name}
-                  </span>
-                  <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-700 px-2 py-0.5 text-[11px]">
-                    {siteNameFor(tpl.site_id)}
-                  </span>
-                </div>
-                {tpl.description && (
-                  <div className="text-xs text-gray-600">
-                    {tpl.description}
-                  </div>
+              <div className="flex items-start gap-3 flex-1">
+                {tpl.logo_data_url && (
+                  <img
+                    src={tpl.logo_data_url}
+                    alt={tpl.name}
+                    className="h-10 w-10 object-cover rounded-md border bg-white flex-shrink-0"
+                  />
                 )}
-                <div className="text-[11px] text-gray-500">
-                  Sections: {tpl.definition.sections?.length || 0}
-                  {tpl.updated_at && (
-                    <>
-                      {" "}
-                      • Updated:{" "}
-                      {new Date(tpl.updated_at).toLocaleDateString()}
-                    </>
+                <div className="space-y-1 text-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-gray-900">
+                      {tpl.name}
+                    </span>
+                    <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-700 px-2 py-0.5 text-[11px]">
+                      {siteNameFor(tpl.site_id)}
+                    </span>
+                  </div>
+                  {tpl.description && (
+                    <div className="text-xs text-gray-600">
+                      {tpl.description}
+                    </div>
                   )}
+                  <div className="text-[11px] text-gray-500">
+                    Sections: {tpl.definition.sections?.length || 0}
+                    {tpl.updated_at && (
+                      <>
+                        {" "}
+                        • Updated:{" "}
+                        {new Date(tpl.updated_at).toLocaleDateString()}
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -446,7 +459,7 @@ export default function TemplatesPage() {
 }
 
 // --------------------------------------------------------
-// Template editor modal
+// Template editor modal (with template logo)
 // --------------------------------------------------------
 
 type TemplateEditorModalProps = {
@@ -478,6 +491,9 @@ function TemplateEditorModal({
             questions: [],
           },
         ]
+  );
+  const [logoDataUrl, setLogoDataUrl] = useState<string | null>(
+    initial.logo_data_url || null
   );
   const [saving, setSaving] = useState(false);
 
@@ -573,6 +589,15 @@ function TemplateEditorModal({
     reader.readAsDataURL(file);
   };
 
+  const onLogoChange = (file: File | null) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      setLogoDataUrl(String(reader.result));
+    };
+    reader.readAsDataURL(file);
+  };
+
   const onSave = async () => {
     if (!name.trim()) {
       alert("Template name is required.");
@@ -604,6 +629,7 @@ function TemplateEditorModal({
           description: description || null,
           site_id: siteId || null,
           definition,
+          logo_data_url: logoDataUrl,
         });
         if (error) throw error;
       } else {
@@ -614,6 +640,7 @@ function TemplateEditorModal({
             description: description || null,
             site_id: siteId || null,
             definition,
+            logo_data_url: logoDataUrl,
           })
           .eq("id", initial.id);
         if (error) throw error;
@@ -632,14 +659,23 @@ function TemplateEditorModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
       <div className="w-full max-w-5xl max-h-[90vh] overflow-auto rounded-2xl bg-white shadow-xl p-5 space-y-4">
         <div className="flex items-center justify-between gap-2 border-b pb-3">
-          <div>
-            <h2 className="font-semibold text-lg text-gray-900">
-              {isNew ? "New template" : "Edit template"}
-            </h2>
-            <p className="text-xs text-gray-500">
-              Add sections, images and questions. Multiple choice uses simple
-              comma-separated options.
-            </p>
+          <div className="flex items-center gap-3">
+            {logoDataUrl && (
+              <img
+                src={logoDataUrl}
+                alt={name || "Template logo"}
+                className="h-10 w-10 object-cover rounded-md border bg-white"
+              />
+            )}
+            <div>
+              <h2 className="font-semibold text-lg text-gray-900">
+                {isNew ? "New template" : "Edit template"}
+              </h2>
+              <p className="text-xs text-gray-500">
+                Add a template logo, sections, images and questions. Multiple
+                choice uses simple comma-separated options.
+              </p>
+            </div>
           </div>
           <div className="flex gap-2 text-sm">
             <button
@@ -658,7 +694,7 @@ function TemplateEditorModal({
           </div>
         </div>
 
-        {/* Basic info */}
+        {/* Basic info + logo */}
         <div className="grid md:grid-cols-3 gap-3 text-sm">
           <div className="md:col-span-2 space-y-2">
             <div>
@@ -684,26 +720,62 @@ function TemplateEditorModal({
               />
             </div>
           </div>
-          <div>
-            <label className="block text-xs text-gray-600 mb-1">
-              Site (optional)
-            </label>
-            <select
-              value={siteId}
-              onChange={(e) => setSiteId(e.target.value)}
-              className="w-full border rounded-xl px-3 py-2"
-            >
-              <option value="">All sites</option>
-              {sites.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-            <p className="mt-2 text-[11px] text-gray-500">
-              When assigned, this template will appear under that site filter
-              and new inspections will be tagged with that site.
-            </p>
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs text-gray-600 mb-1">
+                Site (optional)
+              </label>
+              <select
+                value={siteId}
+                onChange={(e) => setSiteId(e.target.value)}
+                className="w-full border rounded-xl px-3 py-2"
+              >
+                <option value="">All sites</option>
+                {sites.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-2 text-[11px] text-gray-500">
+                When assigned, this template will appear under that site
+                filter and new inspections will be tagged with that site.
+              </p>
+            </div>
+            <div>
+              <label className="block text-xs text-gray-600 mb-1">
+                Template logo
+              </label>
+              <div className="flex items-center gap-2">
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <span className="px-2 py-1 border rounded-xl bg-white hover:bg-gray-50 text-xs">
+                    {logoDataUrl ? "Change logo" : "Upload logo"}
+                  </span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) =>
+                      onLogoChange(
+                        e.target.files ? e.target.files[0] : null
+                      )
+                    }
+                  />
+                </label>
+                {logoDataUrl && (
+                  <button
+                    onClick={() => setLogoDataUrl(null)}
+                    className="text-xs text-rose-600 hover:underline"
+                  >
+                    Remove logo
+                  </button>
+                )}
+              </div>
+              <p className="mt-1 text-[11px] text-gray-500">
+                Shown on the Templates list and in inspection popups to help
+                users quickly identify this check.
+              </p>
+            </div>
           </div>
         </div>
 
