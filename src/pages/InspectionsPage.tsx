@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/utils/supabaseClient";
+import jsPDF from "jspdf";
 
 type Role = "admin" | "manager" | "inspector" | string | null;
 
@@ -62,6 +63,9 @@ export default function InspectionsPage() {
   const [filterStatus, setFilterStatus] = useState<
     "all" | "in_progress" | "submitted"
   >("all");
+
+  // Multi-select state
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   // Modal state
   const [activeInspection, setActiveInspection] =
@@ -144,6 +148,7 @@ export default function InspectionsPage() {
       })) as InspectionRow[];
 
       setInspections(mapped);
+      setSelectedIds([]); // clear selection whenever list reloads
     } catch (e: any) {
       console.error("loadInspections error", e);
       setError(
@@ -166,10 +171,32 @@ export default function InspectionsPage() {
       if (filterStatus !== "all" && i.status !== filterStatus) {
         return false;
       }
-      // optionally restrict non-admins to their own; for now let everyone see all
       return true;
     });
   }, [inspections, filterStatus]);
+
+  // ------------------------------
+  // Selection helpers
+  // ------------------------------
+  const toggleSelected = (id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+
+  const selectAllVisible = () => {
+    const visibleIds = filteredInspections.map((i) => i.id);
+    setSelectedIds(visibleIds);
+  };
+
+  const clearSelection = () => {
+    setSelectedIds([]);
+  };
+
+  const selectedInspections = useMemo(
+    () => inspections.filter((i) => selectedIds.includes(i.id)),
+    [inspections, selectedIds]
+  );
 
   // ------------------------------
   // Open inspection modal
@@ -285,7 +312,6 @@ export default function InspectionsPage() {
         const a = ans.find((x) => x.questionId === q.id);
         if (!a || a.value == null) continue;
 
-        // Only score yes/no/na and good/fair/poor for now
         if (q.type === "yes_no_na") {
           total += 1;
           if (a.value === "yes") positive += 1;
@@ -373,12 +399,11 @@ export default function InspectionsPage() {
   };
 
   // ------------------------------
-  // Delete inspection
+  // Delete inspection (single)
   // ------------------------------
   const canDeleteInspection = (insp: InspectionRow): boolean => {
-    if (isAdmin) return true; // admin can delete any
+    if (isAdmin) return true;
     if (!currentUserId) return false;
-    // non-admin: only delete own in-progress
     return insp.status === "in_progress" && insp.owner_user_id === currentUserId;
   };
 
@@ -412,6 +437,178 @@ export default function InspectionsPage() {
     } catch (e: any) {
       console.error("deleteInspection error", e);
       alert(e?.message || "Could not delete inspection.");
+    }
+  };
+
+  // ------------------------------
+  // Bulk delete (admin only)
+  // ------------------------------
+  const bulkDeleteSelected = async () => {
+    if (!selectedIds.length) return;
+    if (!isAdmin) {
+      alert("Only admins can bulk delete inspections.");
+      return;
+    }
+    if (
+      !confirm(
+        `Delete ${selectedIds.length} inspections? This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+    try {
+      const { error } = await supabase
+        .from("inspections")
+        .delete()
+        .in("id", selectedIds);
+      if (error) throw error;
+
+      await loadInspections();
+      alert("Selected inspections deleted.");
+    } catch (e: any) {
+      console.error("bulkDeleteSelected error", e);
+      alert(e?.message || "Could not bulk delete inspections.");
+    }
+  };
+
+  // ------------------------------
+  // Bulk download selected as single PDF
+  // ------------------------------
+  const downloadSelectedAsPdf = async () => {
+    if (!selectedIds.length) {
+      alert("Select at least one inspection first.");
+      return;
+    }
+
+    try {
+      const selected = inspections.filter((i) =>
+        selectedIds.includes(i.id)
+      );
+      if (!selected.length) {
+        alert("No matching inspections found.");
+        return;
+      }
+
+      // Fetch template definitions for all template_ids involved
+      const templateIds = Array.from(
+        new Set(selected.map((i) => i.template_id))
+      );
+      const { data: templatesData, error } = await supabase
+        .from("templates")
+        .select("id, definition")
+        .in("id", templateIds);
+
+      if (error) throw error;
+
+      const defMap = new Map<string, TemplateDefinition>();
+      (templatesData || []).forEach((t: any) => {
+        const def: TemplateDefinition =
+          (t.definition as TemplateDefinition) || { sections: [] };
+        defMap.set(t.id, def);
+      });
+
+      const doc = new jsPDF();
+      doc.setFont("helvetica", "normal");
+
+      selected.forEach((insp, idx) => {
+        if (idx > 0) {
+          doc.addPage();
+        }
+
+        const def = defMap.get(insp.template_id) || { sections: [] };
+        const items = (insp.items || []) as InspectionAnswer[];
+
+        let y = 10;
+        doc.setFontSize(14);
+        doc.text(`Inspection: ${insp.template_name}`, 10, y);
+        y += 6;
+
+        doc.setFontSize(10);
+        doc.text(`Site: ${insp.site || "—"}`, 10, y);
+        y += 5;
+        doc.text(
+          `Started: ${insp.started_at || "—"}`,
+          10,
+          y
+        );
+        y += 5;
+        doc.text(
+          `Submitted: ${insp.submitted_at || "—"}`,
+          10,
+          y
+        );
+        y += 5;
+        doc.text(
+          `By: ${insp.owner_name || "Unknown"} • Status: ${
+            insp.status === "in_progress" ? "In progress" : "Completed"
+          }${typeof insp.score === "number" ? ` • Score: ${insp.score}%` : ""}`,
+          10,
+          y
+        );
+        y += 8;
+
+        // For each section/question
+        for (const sec of def.sections || []) {
+          if (y > 270) {
+            doc.addPage();
+            y = 10;
+          }
+          doc.setFontSize(11);
+          doc.text(`Section: ${sec.title}`, 10, y);
+          y += 5;
+
+          for (const q of sec.questions || []) {
+            if (y > 270) {
+              doc.addPage();
+              y = 10;
+            }
+
+            const ans = items.find((a) => a.questionId === q.id);
+
+            doc.setFontSize(10);
+            const qText = `Q: ${q.label}`;
+            doc.text(qText, 10, y);
+            y += 4;
+
+            const v = ans?.value || "";
+            if (v) {
+              doc.text(`Answer: ${v}`, 14, y);
+              y += 4;
+            }
+
+            if (ans?.notes) {
+              const notesLines = doc.splitTextToSize(
+                `Notes: ${ans.notes}`,
+                180
+              );
+              doc.text(notesLines, 14, y);
+              y += 4 + (notesLines.length - 1) * 4;
+            }
+
+            // We won't embed photos (too heavy); just mention count
+            if (ans?.photos && ans.photos.length > 0) {
+              doc.text(
+                `Photos attached: ${ans.photos.length}`,
+                14,
+                y
+              );
+              y += 4;
+            }
+
+            y += 2;
+          }
+
+          y += 3;
+        }
+      });
+
+      doc.save("auditking-inspections.pdf");
+    } catch (e: any) {
+      console.error("downloadSelectedAsPdf error", e);
+      alert(
+        e?.message ||
+          "Could not generate PDF. Check that jspdf is installed."
+      );
     }
   };
 
@@ -457,42 +654,81 @@ export default function InspectionsPage() {
           ) : (
             <p className="text-sm text-gray-600">
               Start, resume and review inspections. Use the popup to answer
-              questions and save progress.
+              questions and save progress. Use checkboxes to select multiple
+              inspections for bulk PDF export or (for admins) bulk delete.
             </p>
           )}
         </div>
 
-        <div className="flex gap-2 text-xs">
-          <button
-            onClick={() => setFilterStatus("all")}
-            className={`px-3 py-1 rounded-xl border ${
-              filterStatus === "all"
-                ? "bg-purple-700 text-white border-purple-700"
-                : "bg-white text-gray-700 hover:bg-gray-50"
-            }`}
-          >
-            All
-          </button>
-          <button
-            onClick={() => setFilterStatus("in_progress")}
-            className={`px-3 py-1 rounded-xl border ${
-              filterStatus === "in_progress"
-                ? "bg-purple-700 text-white border-purple-700"
-                : "bg-white text-gray-700 hover:bg-gray-50"
-            }`}
-          >
-            In progress
-          </button>
-          <button
-            onClick={() => setFilterStatus("submitted")}
-            className={`px-3 py-1 rounded-xl border ${
-              filterStatus === "submitted"
-                ? "bg-purple-700 text-white border-purple-700"
-                : "bg-white text-gray-700 hover:bg-gray-50"
-            }`}
-          >
-            Completed
-          </button>
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex gap-2 text-xs">
+            <button
+              onClick={() => setFilterStatus("all")}
+              className={`px-3 py-1 rounded-xl border ${
+                filterStatus === "all"
+                  ? "bg-purple-700 text-white border-purple-700"
+                  : "bg-white text-gray-700 hover:bg-gray-50"
+              }`}
+            >
+              All
+            </button>
+            <button
+              onClick={() => setFilterStatus("in_progress")}
+              className={`px-3 py-1 rounded-xl border ${
+                filterStatus === "in_progress"
+                  ? "bg-purple-700 text-white border-purple-700"
+                  : "bg-white text-gray-700 hover:bg-gray-50"
+              }`}
+            >
+              In progress
+            </button>
+            <button
+              onClick={() => setFilterStatus("submitted")}
+              className={`px-3 py-1 rounded-xl border ${
+                filterStatus === "submitted"
+                  ? "bg-purple-700 text-white border-purple-700"
+                  : "bg-white text-gray-700 hover:bg-gray-50"
+              }`}
+            >
+              Completed
+            </button>
+          </div>
+
+          {/* Bulk actions summary */}
+          {selectedIds.length > 0 && (
+            <div className="flex items-center gap-2 text-[11px] bg-purple-50 border border-purple-100 rounded-xl px-3 py-1">
+              <span className="text-purple-800">
+                {selectedIds.length} selected
+              </span>
+              <button
+                onClick={selectAllVisible}
+                className="underline text-purple-700"
+              >
+                Select visible
+              </button>
+              <button
+                onClick={clearSelection}
+                className="underline text-gray-500"
+              >
+                Clear
+              </button>
+              <span className="mx-1 text-gray-300">|</span>
+              <button
+                onClick={downloadSelectedAsPdf}
+                className="text-purple-700 underline"
+              >
+                Download PDF
+              </button>
+              {isAdmin && (
+                <button
+                  onClick={bulkDeleteSelected}
+                  className="text-rose-600 underline"
+                >
+                  Delete selected
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -517,28 +753,33 @@ export default function InspectionsPage() {
               key={insp.id}
               className="border rounded-2xl bg-white p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-2 shadow-sm"
             >
-              <div className="space-y-1 text-sm">
-                <div className="flex items-center gap-2">
-                  <span className="font-semibold text-gray-900">
-                    {insp.template_name}
-                  </span>
-                  {statusBadge(insp.status)}
-                </div>
-                <div className="text-xs text-gray-600">
-                  Site: {insp.site || "—"}
-                  {" • "}
-                  Started: {formatDate(insp.started_at)}
-                  {" • "}
-                  Completed: {formatDate(insp.submitted_at)}
-                </div>
-                <div className="text-xs text-gray-500">
-                  By: {insp.owner_name || "Unknown"}
-                  {typeof insp.score === "number" && (
-                    <>
-                      {" • "}
-                      Score: {insp.score}%
-                    </>
-                  )}
+              <div className="flex items-start gap-3 flex-1">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={selectedIds.includes(insp.id)}
+                  onChange={() => toggleSelected(insp.id)}
+                />
+                <div className="space-y-1 text-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-gray-900">
+                      {insp.template_name}
+                    </span>
+                    {statusBadge(insp.status)}
+                  </div>
+                  <div className="text-xs text-gray-600">
+                    Site: {insp.site || "—"}
+                    {" • "}
+                    Started: {formatDate(insp.started_at)}
+                    {" • "}
+                    Completed: {formatDate(insp.submitted_at)}
+                  </div>
+                  <div className="text-xs text-gray-500">
+                    By: {insp.owner_name || "Unknown"}
+                    {typeof insp.score === "number" && (
+                      <> • Score: {insp.score}%</>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -853,7 +1094,8 @@ export default function InspectionsPage() {
                       </button>
                     )}
                     {activeInspection &&
-                      canDeleteInspection(activeInspection) && (
+                      canDeleteInspection(activeInspection) &&
+                      (
                         <button
                           onClick={() => deleteInspection(activeInspection)}
                           disabled={modalSaving}
