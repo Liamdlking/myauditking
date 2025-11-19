@@ -1,19 +1,15 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/utils/supabaseClient";
 
 type Role = "admin" | "manager" | "inspector" | string | null;
 
-type QuestionType =
-  | "yes_no_na"
-  | "good_fair_poor"
-  | "multiple_choice"
-  | "text";
+type QuestionType = "yes_no_na" | "good_fair_poor" | "multiple_choice" | "text";
 
 type TemplateQuestion = {
   id: string;
   label: string;
   type: QuestionType;
-  options?: string[]; // for multiple_choice
+  options?: string[];
   allowNotes: boolean;
   allowPhoto: boolean;
   required: boolean;
@@ -34,53 +30,52 @@ type TemplateRow = {
   id: string;
   name: string;
   description: string | null;
-  site: string | null;
+  site_id: string | null;
+  definition: TemplateDefinition;
   updated_at: string | null;
-  definition: TemplateDefinition | null;
-  logo_data_url: string | null;
 };
 
-function uuid() {
-  const g: any = globalThis as any;
-  if (g.crypto && typeof g.crypto.randomUUID === "function") {
-    return g.crypto.randomUUID();
-  }
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+type SiteRow = {
+  id: string;
+  name: string;
+};
+
+function randomId(prefix: string) {
+  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export default function TemplatesPage() {
+  const [role, setRole] = useState<Role>(null);
+  const [roleLoading, setRoleLoading] = useState(true);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
+  const [sites, setSites] = useState<SiteRow[]>([]);
+  const [selectedSiteId, setSelectedSiteId] = useState<string>("all");
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [role, setRole] = useState<Role>(null);
-  const [roleLoading, setRoleLoading] = useState(true);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorInitial, setEditorInitial] = useState<TemplateRow | null>(null);
 
-  const [editingTemplate, setEditingTemplate] = useState<TemplateRow | null>(
-    null
-  );
-  const [isCreating, setIsCreating] = useState(false);
+  const [starting, setStarting] = useState<string | null>(null);
 
-  const [formName, setFormName] = useState("");
-  const [formDescription, setFormDescription] = useState("");
-  const [formSite, setFormSite] = useState("");
-  const [formLogoDataUrl, setFormLogoDataUrl] = useState<string | null>(null);
-  const [formSections, setFormSections] = useState<TemplateSection[]>([]);
-  const [saving, setSaving] = useState(false);
-
-  // ------------------------------
-  // Load current user's role
-  // ------------------------------
+  // ----------------------------------
+  // Load current user role
+  // ----------------------------------
   useEffect(() => {
-    const loadRole = async () => {
+    const loadUserAndRole = async () => {
       setRoleLoading(true);
       try {
         const { data: userData } = await supabase.auth.getUser();
         const user = userData?.user;
         if (!user) {
           setRole(null);
+          setCurrentUserId(null);
           return;
         }
+        setCurrentUserId(user.id);
 
         const { data, error } = await supabase
           .from("profiles")
@@ -100,43 +95,60 @@ export default function TemplatesPage() {
       }
     };
 
-    loadRole();
+    loadUserAndRole();
   }, []);
 
   const isAdmin = role === "admin";
   const isManager = role === "manager";
-  const isInspector = role === "inspector" || !role;
+  const canEditTemplates = isAdmin || isManager;
 
-  // ------------------------------
-  // Load templates list
-  // ------------------------------
+  // ----------------------------------
+  // Load sites
+  // ----------------------------------
+  const loadSites = async () => {
+    try {
+      const { data, error } = await supabase
+        .from("sites")
+        .select("id, name")
+        .order("name", { ascending: true });
+
+      if (error) throw error;
+
+      setSites(
+        (data || []).map((s: any) => ({
+          id: s.id,
+          name: s.name,
+        }))
+      );
+    } catch (e: any) {
+      console.error("loadSites error", e);
+      // Soft-fail: templates still usable without sites
+    }
+  };
+
+  // ----------------------------------
+  // Load templates
+  // ----------------------------------
   const loadTemplates = async () => {
     setLoading(true);
     setError(null);
     try {
       const { data, error } = await supabase
         .from("templates")
-        .select(
-          "id, name, description, site, updated_at, definition, logo_data_url"
-        )
-        .order("updated_at", { ascending: false });
+        .select("id, name, description, site_id, definition, updated_at")
+        .order("name", { ascending: true });
 
       if (error) throw error;
 
-      const mapped = (data || []).map((t: any) => {
-        const def: TemplateDefinition =
-          (t.definition as TemplateDefinition) || { sections: [] };
-        return {
-          id: t.id,
-          name: t.name,
-          description: t.description,
-          site: t.site,
-          updated_at: t.updated_at,
-          logo_data_url: t.logo_data_url || null,
-          definition:
-            def && Array.isArray(def.sections) ? def : { sections: [] },
-        } as TemplateRow;
-      });
+      const mapped: TemplateRow[] = (data || []).map((t: any) => ({
+        id: t.id,
+        name: t.name,
+        description: t.description || null,
+        site_id: t.site_id || null,
+        definition:
+          (t.definition as TemplateDefinition) || { sections: [] },
+        updated_at: t.updated_at || null,
+      }));
 
       setTemplates(mapped);
     } catch (e: any) {
@@ -150,358 +162,106 @@ export default function TemplatesPage() {
   };
 
   useEffect(() => {
+    loadSites();
     loadTemplates();
   }, []);
 
-  // ------------------------------
+  // ----------------------------------
+  // Filtered list by site
+  // ----------------------------------
+  const templatesFiltered = useMemo(() => {
+    return templates.filter((tpl) => {
+      if (selectedSiteId === "all") return true;
+      return tpl.site_id === selectedSiteId;
+    });
+  }, [templates, selectedSiteId]);
+
+  const siteNameFor = (site_id: string | null) => {
+    if (!site_id) return "All sites";
+    const s = sites.find((x) => x.id === site_id);
+    return s ? s.name : "Unknown site";
+  };
+
+  // ----------------------------------
   // Start inspection from template
-  // ------------------------------
+  // ----------------------------------
   const startInspection = async (tpl: TemplateRow) => {
+    if (!currentUserId) {
+      alert("You must be signed in to start an inspection.");
+      return;
+    }
+    if (!tpl.site_id) {
+      alert(
+        "This template is not assigned to a site. Edit the template and choose a site first."
+      );
+      return;
+    }
+
+    setStarting(tpl.id);
     try {
-      const { data: userData } = await supabase.auth.getUser();
-      const user = userData?.user;
-      if (!user) {
-        alert("You must be logged in to start an inspection.");
-        return;
+      // Get site name for convenience
+      const site = sites.find((s) => s.id === tpl.site_id);
+      const siteName = site?.name || null;
+
+      // Get display name for owner if available
+      let ownerName: string | null = null;
+      try {
+        const { data: profile, error: profileError } = await supabase
+          .from("profiles")
+          .select("display_name")
+          .eq("user_id", currentUserId)
+          .single();
+        if (!profileError && profile) {
+          ownerName = profile.display_name || null;
+        }
+      } catch {
+        // ignore
       }
 
-      const payload = {
+      const { error } = await supabase.from("inspections").insert({
         template_id: tpl.id,
         template_name: tpl.name,
-        site: tpl.site,
+        site_id: tpl.site_id,
+        site: siteName,
         status: "in_progress",
         started_at: new Date().toISOString(),
-        submitted_at: null,
-        score: null,
         items: [],
-        owner_user_id: user.id,
-        owner_name: user.email ?? "Unknown",
-      };
+        owner_user_id: currentUserId,
+        owner_name: ownerName,
+      });
 
-      const { error } = await supabase.from("inspections").insert([payload]);
       if (error) throw error;
 
       alert(
-        "Inspection started. You can continue it from the Inspections page."
+        "Inspection started. Go to the Inspections page to complete it."
       );
-
-      // If you prefer to redirect straight away, swap the alert for:
-      // window.location.href = "/inspections";
     } catch (e: any) {
       console.error("startInspection error", e);
       alert(
         e?.message ||
-          "Could not start inspection. Check the inspections table schema."
+          "Could not start inspection. Check that the inspections table has the right columns (including site_id, items)."
       );
-    }
-  };
-
-  const handleStartInspectionClick = (
-    e: React.MouseEvent<HTMLButtonElement>,
-    tpl: TemplateRow
-  ) => {
-    e.preventDefault(); // make sure no parent form submits
-    e.stopPropagation();
-    void startInspection(tpl);
-  };
-
-  // ------------------------------
-  // Open / close modal
-  // ------------------------------
-  const openCreate = () => {
-    setIsCreating(true);
-    setEditingTemplate(null);
-    setFormName("");
-    setFormDescription("");
-    setFormSite("");
-    setFormLogoDataUrl(null);
-    setFormSections([]);
-  };
-
-  const openEdit = (tpl: TemplateRow) => {
-    setIsCreating(false);
-    setEditingTemplate(tpl);
-    setFormName(tpl.name);
-    setFormDescription(tpl.description || "");
-    setFormSite(tpl.site || "");
-    setFormLogoDataUrl(tpl.logo_data_url || null);
-
-    const def: TemplateDefinition = tpl.definition || { sections: [] };
-    setFormSections(def.sections || []);
-  };
-
-  const closeModal = () => {
-    setEditingTemplate(null);
-    setIsCreating(false);
-    setFormName("");
-    setFormDescription("");
-    setFormSite("");
-    setFormLogoDataUrl(null);
-    setFormSections([]);
-    setSaving(false);
-  };
-
-  // ------------------------------
-  // Logo upload
-  // ------------------------------
-  const handleLogoFile = (file: File | null) => {
-    if (!file) {
-      setFormLogoDataUrl(null);
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      setFormLogoDataUrl(String(reader.result));
-    };
-    reader.readAsDataURL(file);
-  };
-
-  // ------------------------------
-  // Section helpers
-  // ------------------------------
-  const addSection = () => {
-    setFormSections((prev) => [
-      ...prev,
-      {
-        id: uuid(),
-        title: "New section",
-        image_data_url: null,
-        questions: [],
-      },
-    ]);
-  };
-
-  const updateSection = (id: string, patch: Partial<TemplateSection>) => {
-    setFormSections((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, ...patch } : s))
-    );
-  };
-
-  const deleteSection = (id: string) => {
-    setFormSections((prev) => prev.filter((s) => s.id !== id));
-  };
-
-  const moveSection = (id: string, direction: "up" | "down") => {
-    setFormSections((prev) => {
-      const idx = prev.findIndex((s) => s.id === id);
-      if (idx === -1) return prev;
-      if (direction === "up" && idx === 0) return prev;
-      if (direction === "down" && idx === prev.length - 1) return prev;
-      const newArr = [...prev];
-      const swapWith = direction === "up" ? idx - 1 : idx + 1;
-      const tmp = newArr[idx];
-      newArr[idx] = newArr[swapWith];
-      newArr[swapWith] = tmp;
-      return newArr;
-    });
-  };
-
-  const handleSectionImageFile = (sectionId: string, file: File | null) => {
-    if (!file) {
-      updateSection(sectionId, { image_data_url: null });
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      updateSection(sectionId, { image_data_url: String(reader.result) });
-    };
-    reader.readAsDataURL(file);
-  };
-
-  // ------------------------------
-  // Question helpers
-  // ------------------------------
-  const addQuestionToSection = (sectionId: string) => {
-    setFormSections((prev) =>
-      prev.map((s) =>
-        s.id === sectionId
-          ? {
-              ...s,
-              questions: [
-                ...s.questions,
-                {
-                  id: uuid(),
-                  label: "New question",
-                  type: "yes_no_na",
-                  options: [],
-                  allowNotes: true,
-                  allowPhoto: false,
-                  required: true,
-                },
-              ],
-            }
-          : s
-      )
-    );
-  };
-
-  const updateQuestionInSection = (
-    sectionId: string,
-    questionId: string,
-    patch: Partial<TemplateQuestion>
-  ) => {
-    setFormSections((prev) =>
-      prev.map((s) =>
-        s.id === sectionId
-          ? {
-              ...s,
-              questions: s.questions.map((q) =>
-                q.id === questionId ? { ...q, ...patch } : q
-              ),
-            }
-          : s
-      )
-    );
-  };
-
-  const deleteQuestionFromSection = (sectionId: string, questionId: string) => {
-    setFormSections((prev) =>
-      prev.map((s) =>
-        s.id === sectionId
-          ? {
-              ...s,
-              questions: s.questions.filter((q) => q.id !== questionId),
-            }
-          : s
-      )
-    );
-  };
-
-  const moveQuestionWithinSection = (
-    sectionId: string,
-    questionId: string,
-    direction: "up" | "down"
-  ) => {
-    setFormSections((prev) =>
-      prev.map((s) => {
-        if (s.id !== sectionId) return s;
-        const idx = s.questions.findIndex((q) => q.id === questionId);
-        if (idx === -1) return s;
-        if (direction === "up" && idx === 0) return s;
-        if (direction === "down" && idx === s.questions.length - 1) return s;
-        const newQuestions = [...s.questions];
-        const swapWith = direction === "up" ? idx - 1 : idx + 1;
-        const tmp = newQuestions[idx];
-        newQuestions[idx] = newQuestions[swapWith];
-        newQuestions[swapWith] = tmp;
-        return { ...s, questions: newQuestions };
-      })
-    );
-  };
-
-  const updateQuestionOption = (
-    sectionId: string,
-    questionId: string,
-    index: number,
-    value: string
-  ) => {
-    setFormSections((prev) =>
-      prev.map((s) => {
-        if (s.id !== sectionId) return s;
-        return {
-          ...s,
-          questions: s.questions.map((q) => {
-            if (q.id !== questionId) return q;
-            const opts = q.options ? [...q.options] : [];
-            opts[index] = value;
-            return { ...q, options: opts };
-          }),
-        };
-      })
-    );
-  };
-
-  const addQuestionOption = (sectionId: string, questionId: string) => {
-    setFormSections((prev) =>
-      prev.map((s) => {
-        if (s.id !== sectionId) return s;
-        return {
-          ...s,
-          questions: s.questions.map((q) => {
-            if (q.id !== questionId) return q;
-            const opts = q.options ? [...q.options] : [];
-            opts.push("New option");
-            return { ...q, options: opts };
-          }),
-        };
-      })
-    );
-  };
-
-  const removeQuestionOption = (
-    sectionId: string,
-    questionId: string,
-    index: number
-  ) => {
-    setFormSections((prev) =>
-      prev.map((s) => {
-        if (s.id !== sectionId) return s;
-        return {
-          ...s,
-          questions: s.questions.map((q) => {
-            if (q.id !== questionId) return q;
-            const opts = q.options ? [...q.options] : [];
-            opts.splice(index, 1);
-            return { ...q, options: opts };
-          }),
-        };
-      })
-    );
-  };
-
-  // ------------------------------
-  // Save / delete template
-  // ------------------------------
-  const handleSaveTemplate = async () => {
-    if (!formName.trim()) {
-      alert("Template name is required.");
-      return;
-    }
-
-    setSaving(true);
-    try {
-      const definition: TemplateDefinition = {
-        sections: formSections,
-      };
-
-      if (isCreating || !editingTemplate) {
-        const { error } = await supabase.from("templates").insert([
-          {
-            name: formName.trim(),
-            description: formDescription.trim() || null,
-            site: formSite.trim() || null,
-            logo_data_url: formLogoDataUrl,
-            definition,
-          },
-        ]);
-        if (error) throw error;
-      } else {
-        const { error } = await supabase
-          .from("templates")
-          .update({
-            name: formName.trim(),
-            description: formDescription.trim() || null,
-            site: formSite.trim() || null,
-            logo_data_url: formLogoDataUrl,
-            definition,
-          })
-          .eq("id", editingTemplate.id);
-        if (error) throw error;
-      }
-
-      await loadTemplates();
-      closeModal();
-    } catch (e: any) {
-      console.error("handleSaveTemplate error", e);
-      alert(e?.message || "Could not save template.");
     } finally {
-      setSaving(false);
+      setStarting(null);
     }
   };
 
-  const handleDeleteTemplate = async (tpl: TemplateRow) => {
-    if (!window.confirm(`Delete template "${tpl.name}"? This cannot be undone.`))
+  // ----------------------------------
+  // Delete template (admin only)
+  // ----------------------------------
+  const deleteTemplate = async (tpl: TemplateRow) => {
+    if (!isAdmin) {
+      alert("Only admins can delete templates.");
       return;
+    }
+    if (
+      !confirm(
+        `Delete template "${tpl.name}"? This will not delete existing inspections that used it.`
+      )
+    ) {
+      return;
+    }
+
     try {
       const { error } = await supabase
         .from("templates")
@@ -509,575 +269,674 @@ export default function TemplatesPage() {
         .eq("id", tpl.id);
       if (error) throw error;
       await loadTemplates();
+      alert("Template deleted.");
     } catch (e: any) {
-      console.error("handleDeleteTemplate error", e);
+      console.error("deleteTemplate error", e);
       alert(e?.message || "Could not delete template.");
     }
   };
 
-  // ------------------------------
-  // Render
-  // ------------------------------
-  const canEditTemplates = isAdmin || isManager;
+  const openNewTemplate = () => {
+    if (!canEditTemplates) {
+      alert("Only managers/admins can create templates.");
+      return;
+    }
+    const empty: TemplateRow = {
+      id: "",
+      name: "",
+      description: "",
+      site_id: null,
+      definition: { sections: [] },
+      updated_at: null,
+    };
+    setEditorInitial(empty);
+    setEditorOpen(true);
+  };
 
-  if (roleLoading || loading) {
-    return (
-      <div style={{ padding: "1.5rem" }}>
-        <h1>Templates</h1>
-        <p>Loading…</p>
-      </div>
-    );
-  }
+  const openEditTemplate = (tpl: TemplateRow) => {
+    if (!canEditTemplates) {
+      alert("Only managers/admins can edit templates.");
+      return;
+    }
+    setEditorInitial(tpl);
+    setEditorOpen(true);
+  };
 
+  // ----------------------------------
+  // Rendering
+  // ----------------------------------
   return (
-    <div style={{ padding: "1.5rem" }}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: "1rem",
-        }}
-      >
-        <h1>Templates</h1>
-        {canEditTemplates && (
-          <button type="button" onClick={openCreate}>
-            New Template
-          </button>
-        )}
+    <div className="max-w-6xl mx-auto py-6 space-y-4">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <h1 className="text-2xl font-bold text-purple-700">Templates</h1>
+          {roleLoading ? (
+            <p className="text-xs text-gray-500">Checking permissions…</p>
+          ) : (
+            <p className="text-sm text-gray-600">
+              Build structured checklists with sections, images and
+              multiple-choice questions. Assign them to sites so your teams
+              can start inspections quickly.
+            </p>
+          )}
+        </div>
+
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex gap-2 items-center text-xs">
+            <span className="text-gray-500">Filter by site:</span>
+            <select
+              value={selectedSiteId}
+              onChange={(e) => setSelectedSiteId(e.target.value)}
+              className="border rounded-xl px-3 py-1 text-xs"
+            >
+              <option value="all">All sites</option>
+              {sites.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          {canEditTemplates && (
+            <button
+              onClick={openNewTemplate}
+              className="px-3 py-2 rounded-xl bg-purple-700 text-white text-xs font-medium hover:bg-purple-800"
+            >
+              New template
+            </button>
+          )}
+        </div>
       </div>
 
       {error && (
-        <p style={{ color: "red", marginBottom: "1rem" }}>{error}</p>
+        <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
+          {error}
+        </div>
       )}
 
-      {templates.length === 0 ? (
-        <p>No templates yet.</p>
+      {loading ? (
+        <div className="rounded-xl border bg-white p-4 text-sm text-gray-600">
+          Loading templates…
+        </div>
+      ) : templatesFiltered.length === 0 ? (
+        <div className="rounded-xl border bg-white p-4 text-sm text-gray-600">
+          No templates found.{" "}
+          {canEditTemplates && "Click “New template” to create your first one."}
+        </div>
       ) : (
-        <table
-          style={{
-            width: "100%",
-            borderCollapse: "collapse",
-            marginBottom: "2rem",
-          }}
-        >
-          <thead>
-            <tr>
-              <th style={{ textAlign: "left", borderBottom: "1px solid #ccc" }}>
-                Name
-              </th>
-              <th style={{ textAlign: "left", borderBottom: "1px solid #ccc" }}>
-                Site
-              </th>
-              <th style={{ textAlign: "left", borderBottom: "1px solid #ccc" }}>
-                Updated
-              </th>
-              <th style={{ borderBottom: "1px solid #ccc" }}>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {templates.map((tpl) => (
-              <tr key={tpl.id}>
-                <td
-                  style={{
-                    padding: "0.5rem 0.25rem",
-                    borderBottom: "1px solid #eee",
-                  }}
-                >
-                  {tpl.name}
-                </td>
-                <td
-                  style={{
-                    padding: "0.5rem 0.25rem",
-                    borderBottom: "1px solid #eee",
-                  }}
-                >
-                  {tpl.site || "-"}
-                </td>
-                <td
-                  style={{
-                    padding: "0.5rem 0.25rem",
-                    borderBottom: "1px solid #eee",
-                  }}
-                >
-                  {tpl.updated_at
-                    ? new Date(tpl.updated_at).toLocaleString()
-                    : "-"}
-                </td>
-                <td
-                  style={{
-                    padding: "0.5rem 0.25rem",
-                    borderBottom: "1px solid #eee",
-                  }}
-                >
-                  <button
-                    type="button"
-                    onClick={(e) => handleStartInspectionClick(e, tpl)}
-                  >
-                    Start Inspection
-                  </button>
-                  {canEditTemplates && (
+        <div className="space-y-2">
+          {templatesFiltered.map((tpl) => (
+            <div
+              key={tpl.id}
+              className="border rounded-2xl bg-white p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-2 shadow-sm"
+            >
+              <div className="space-y-1 text-sm">
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-gray-900">
+                    {tpl.name}
+                  </span>
+                  <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-700 px-2 py-0.5 text-[11px]">
+                    {siteNameFor(tpl.site_id)}
+                  </span>
+                </div>
+                {tpl.description && (
+                  <div className="text-xs text-gray-600">
+                    {tpl.description}
+                  </div>
+                )}
+                <div className="text-[11px] text-gray-500">
+                  Sections: {tpl.definition.sections?.length || 0}
+                  {tpl.updated_at && (
                     <>
-                      <button
-                        type="button"
-                        onClick={() => openEdit(tpl)}
-                        style={{ marginLeft: "0.5rem" }}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteTemplate(tpl)}
-                        style={{ marginLeft: "0.5rem" }}
-                      >
-                        Delete
-                      </button>
+                      {" "}
+                      • Updated:{" "}
+                      {new Date(tpl.updated_at).toLocaleDateString()}
                     </>
                   )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 text-xs">
+                <button
+                  onClick={() => startInspection(tpl)}
+                  disabled={!!starting}
+                  className="px-3 py-1 rounded-xl border hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {starting === tpl.id ? "Starting…" : "Start inspection"}
+                </button>
+                {canEditTemplates && (
+                  <button
+                    onClick={() => openEditTemplate(tpl)}
+                    className="px-3 py-1 rounded-xl border hover:bg-gray-50"
+                  >
+                    Edit
+                  </button>
+                )}
+                {isAdmin && (
+                  <button
+                    onClick={() => deleteTemplate(tpl)}
+                    className="px-3 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
+                  >
+                    Delete
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
       )}
 
-      {/* Modal */}
-      {(isCreating || editingTemplate) && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.4)",
-            display: "flex",
-            justifyContent: "center",
-            alignItems: "flex-start",
-            overflowY: "auto",
-            padding: "2rem 1rem",
-            zIndex: 9999,
+      {editorOpen && editorInitial && (
+        <TemplateEditorModal
+          initial={editorInitial}
+          sites={sites}
+          onClose={() => {
+            setEditorOpen(false);
+            setEditorInitial(null);
           }}
-        >
-          <div
-            style={{
-              background: "white",
-              maxWidth: "900px",
-              width: "100%",
-              borderRadius: "8px",
-              padding: "1rem 1.5rem 2rem",
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: "1rem",
-              }}
+          onSaved={() => {
+            setEditorOpen(false);
+            setEditorInitial(null);
+            loadTemplates();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// --------------------------------------------------------
+// Template editor modal
+// --------------------------------------------------------
+
+type TemplateEditorModalProps = {
+  initial: TemplateRow;
+  sites: SiteRow[];
+  onClose: () => void;
+  onSaved: () => void;
+};
+
+function TemplateEditorModal({
+  initial,
+  sites,
+  onClose,
+  onSaved,
+}: TemplateEditorModalProps) {
+  const isNew = !initial.id;
+
+  const [name, setName] = useState(initial.name || "");
+  const [description, setDescription] = useState(initial.description || "");
+  const [siteId, setSiteId] = useState<string>(initial.site_id || "");
+  const [sections, setSections] = useState<TemplateSection[]>(
+    initial.definition?.sections?.length
+      ? initial.definition.sections
+      : [
+          {
+            id: randomId("sec"),
+            title: "Section 1",
+            image_data_url: null,
+            questions: [],
+          },
+        ]
+  );
+  const [saving, setSaving] = useState(false);
+
+  const addSection = () => {
+    setSections((prev) => [
+      ...prev,
+      {
+        id: randomId("sec"),
+        title: `Section ${prev.length + 1}`,
+        image_data_url: null,
+        questions: [],
+      },
+    ]);
+  };
+
+  const updateSection = (id: string, patch: Partial<TemplateSection>) => {
+    setSections((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, ...patch } : s))
+    );
+  };
+
+  const removeSection = (id: string) => {
+    setSections((prev) => prev.filter((s) => s.id !== id));
+  };
+
+  const addQuestion = (sectionId: string, type: QuestionType) => {
+    setSections((prev) =>
+      prev.map((sec) =>
+        sec.id === sectionId
+          ? {
+              ...sec,
+              questions: [
+                ...sec.questions,
+                {
+                  id: randomId("q"),
+                  label: "New question",
+                  type,
+                  options:
+                    type === "multiple_choice"
+                      ? ["Option 1", "Option 2"]
+                      : [],
+                  allowNotes: true,
+                  allowPhoto: false,
+                  required: false,
+                },
+              ],
+            }
+          : sec
+      )
+    );
+  };
+
+  const updateQuestion = (
+    sectionId: string,
+    questionId: string,
+    patch: Partial<TemplateQuestion>
+  ) => {
+    setSections((prev) =>
+      prev.map((sec) =>
+        sec.id === sectionId
+          ? {
+              ...sec,
+              questions: sec.questions.map((q) =>
+                q.id === questionId ? { ...q, ...patch } : q
+              ),
+            }
+          : sec
+      )
+    );
+  };
+
+  const removeQuestion = (sectionId: string, questionId: string) => {
+    setSections((prev) =>
+      prev.map((sec) =>
+        sec.id === sectionId
+          ? {
+              ...sec,
+              questions: sec.questions.filter((q) => q.id !== questionId),
+            }
+          : sec
+      )
+    );
+  };
+
+  const onSectionImageChange = (sectionId: string, file: File | null) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      updateSection(sectionId, {
+        image_data_url: String(reader.result),
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const onSave = async () => {
+    if (!name.trim()) {
+      alert("Template name is required.");
+      return;
+    }
+
+    const cleanedSections: TemplateSection[] = sections.map((sec) => ({
+      ...sec,
+      title: sec.title || "Untitled section",
+      questions: sec.questions.map((q) => ({
+        ...q,
+        label: q.label || "Untitled question",
+        options:
+          q.type === "multiple_choice"
+            ? (q.options || []).filter((o) => o.trim() !== "")
+            : [],
+      })),
+    }));
+
+    const definition: TemplateDefinition = {
+      sections: cleanedSections,
+    };
+
+    setSaving(true);
+    try {
+      if (isNew) {
+        const { error } = await supabase.from("templates").insert({
+          name,
+          description: description || null,
+          site_id: siteId || null,
+          definition,
+        });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase
+          .from("templates")
+          .update({
+            name,
+            description: description || null,
+            site_id: siteId || null,
+            definition,
+          })
+          .eq("id", initial.id);
+        if (error) throw error;
+      }
+
+      onSaved();
+    } catch (e: any) {
+      console.error("Template save error", e);
+      alert(e?.message || "Could not save template.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-full max-w-5xl max-h-[90vh] overflow-auto rounded-2xl bg-white shadow-xl p-5 space-y-4">
+        <div className="flex items-center justify-between gap-2 border-b pb-3">
+          <div>
+            <h2 className="font-semibold text-lg text-gray-900">
+              {isNew ? "New template" : "Edit template"}
+            </h2>
+            <p className="text-xs text-gray-500">
+              Add sections, images and questions. Multiple choice uses simple
+              comma-separated options.
+            </p>
+          </div>
+          <div className="flex gap-2 text-sm">
+            <button
+              onClick={onClose}
+              className="px-3 py-2 rounded-xl border text-gray-600 hover:bg-gray-50"
             >
-              <h2>{isCreating ? "Create Template" : "Edit Template"}</h2>
-              <button type="button" onClick={closeModal}>
-                Close
-              </button>
-            </div>
+              Cancel
+            </button>
+            <button
+              onClick={onSave}
+              disabled={saving}
+              className="px-3 py-2 rounded-xl bg-purple-700 text-white hover:bg-purple-800 disabled:opacity-50"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
 
-            <div style={{ marginBottom: "1rem" }}>
-              <label>
-                Name
-                <input
-                  type="text"
-                  value={formName}
-                  onChange={(e) => setFormName(e.target.value)}
-                  style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
-                />
+        {/* Basic info */}
+        <div className="grid md:grid-cols-3 gap-3 text-sm">
+          <div className="md:col-span-2 space-y-2">
+            <div>
+              <label className="block text-xs text-gray-600 mb-1">
+                Template name
               </label>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="w-full border rounded-xl px-3 py-2"
+                placeholder="e.g. Warehouse daily safety walk"
+              />
             </div>
-
-            <div style={{ marginBottom: "1rem" }}>
-              <label>
+            <div>
+              <label className="block text-xs text-gray-600 mb-1">
                 Description
-                <textarea
-                  value={formDescription}
-                  onChange={(e) => setFormDescription(e.target.value)}
-                  style={{
-                    display: "block",
-                    width: "100%",
-                    marginTop: "0.25rem",
-                    minHeight: "60px",
-                  }}
-                />
               </label>
+              <textarea
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                className="w-full border rounded-xl px-3 py-2 min-h-[60px]"
+                placeholder="Short description for your team…"
+              />
             </div>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-600 mb-1">
+              Site (optional)
+            </label>
+            <select
+              value={siteId}
+              onChange={(e) => setSiteId(e.target.value)}
+              className="w-full border rounded-xl px-3 py-2"
+            >
+              <option value="">All sites</option>
+              {sites.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+            <p className="mt-2 text-[11px] text-gray-500">
+              When assigned, this template will appear under that site filter
+              and new inspections will be tagged with that site.
+            </p>
+          </div>
+        </div>
 
-            <div style={{ marginBottom: "1rem" }}>
-              <label>
-                Site
-                <input
-                  type="text"
-                  value={formSite}
-                  onChange={(e) => setFormSite(e.target.value)}
-                  style={{ display: "block", width: "100%", marginTop: "0.25rem" }}
-                />
-              </label>
-            </div>
-
-            <div style={{ marginBottom: "1rem" }}>
-              <label>
-                Logo
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) =>
-                    handleLogoFile(e.target.files ? e.target.files[0] : null)
-                  }
-                  style={{ display: "block", marginTop: "0.25rem" }}
-                />
-              </label>
-              {formLogoDataUrl && (
-                <div style={{ marginTop: "0.5rem" }}>
-                  <img
-                    src={formLogoDataUrl}
-                    alt="Logo preview"
-                    style={{ maxHeight: "80px" }}
+        {/* Sections & questions */}
+        <div className="space-y-3">
+          {sections.map((sec, secIdx) => (
+            <div
+              key={sec.id}
+              className="border rounded-2xl p-3 bg-gray-50 space-y-3"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-3">
+                  {sec.image_data_url && (
+                    <img
+                      src={sec.image_data_url}
+                      alt={sec.title}
+                      className="h-10 w-10 object-cover rounded-md border bg-white"
+                    />
+                  )}
+                  <input
+                    value={sec.title}
+                    onChange={(e) =>
+                      updateSection(sec.id, { title: e.target.value })
+                    }
+                    className="border rounded-xl px-3 py-1 text-sm bg-white"
+                    placeholder={`Section ${secIdx + 1} title`}
                   />
                 </div>
-              )}
-            </div>
-
-            <hr style={{ margin: "1.5rem 0" }} />
-
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                marginBottom: "0.5rem",
-              }}
-            >
-              <h3>Sections</h3>
-              <button type="button" onClick={addSection}>
-                Add Section
-              </button>
-            </div>
-
-            {formSections.length === 0 && <p>No sections yet.</p>}
-
-            {formSections.map((section, sectionIndex) => (
-              <div
-                key={section.id}
-                style={{
-                  border: "1px solid #ddd",
-                  borderRadius: "6px",
-                  padding: "0.75rem",
-                  marginBottom: "1rem",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    marginBottom: "0.5rem",
-                  }}
-                >
-                  <strong>
-                    Section {sectionIndex + 1}:{" "}
-                    <input
-                      type="text"
-                      value={section.title}
-                      onChange={(e) =>
-                        updateSection(section.id, { title: e.target.value })
-                      }
-                      style={{ marginLeft: "0.5rem" }}
-                    />
-                  </strong>
-                  <div>
-                    <button
-                      type="button"
-                      onClick={() => moveSection(section.id, "up")}
-                      style={{ marginRight: "0.25rem" }}
-                    >
-                      ↑
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => moveSection(section.id, "down")}
-                      style={{ marginRight: "0.25rem" }}
-                    >
-                      ↓
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => deleteSection(section.id)}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </div>
-
-                <div style={{ marginBottom: "0.5rem" }}>
-                  <label>
-                    Section Image
+                <div className="flex items-center gap-2 text-xs">
+                  <label className="inline-flex items-center gap-2 cursor-pointer">
+                    <span className="px-2 py-1 border rounded-xl bg-white hover:bg-gray-50">
+                      {sec.image_data_url ? "Change image" : "Add image"}
+                    </span>
                     <input
                       type="file"
                       accept="image/*"
+                      className="hidden"
                       onChange={(e) =>
-                        handleSectionImageFile(
-                          section.id,
+                        onSectionImageChange(
+                          sec.id,
                           e.target.files ? e.target.files[0] : null
                         )
                       }
-                      style={{ display: "block", marginTop: "0.25rem" }}
                     />
                   </label>
-                  {section.image_data_url && (
-                    <div style={{ marginTop: "0.5rem" }}>
-                      <img
-                        src={section.image_data_url}
-                        alt="Section preview"
-                        style={{ maxHeight: "120px" }}
-                      />
-                    </div>
+                  {sections.length > 1 && (
+                    <button
+                      onClick={() => removeSection(sec.id)}
+                      className="px-2 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
+                    >
+                      Remove section
+                    </button>
                   )}
                 </div>
+              </div>
 
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    marginBottom: "0.25rem",
-                  }}
+              <div className="flex flex-wrap gap-2 text-xs">
+                <button
+                  onClick={() => addQuestion(sec.id, "yes_no_na")}
+                  className="px-2 py-1 rounded-xl border bg-white hover:bg-gray-50"
                 >
-                  <span>Questions</span>
-                  <button
-                    type="button"
-                    onClick={() => addQuestionToSection(section.id)}
-                  >
-                    Add Question
-                  </button>
-                </div>
+                  + Yes / No / N/A
+                </button>
+                <button
+                  onClick={() => addQuestion(sec.id, "good_fair_poor")}
+                  className="px-2 py-1 rounded-xl border bg-white hover:bg-gray-50"
+                >
+                  + Good / Fair / Poor
+                </button>
+                <button
+                  onClick={() => addQuestion(sec.id, "multiple_choice")}
+                  className="px-2 py-1 rounded-xl border bg-white hover:bg-gray-50"
+                >
+                  + Multiple choice
+                </button>
+                <button
+                  onClick={() => addQuestion(sec.id, "text")}
+                  className="px-2 py-1 rounded-xl border bg-white hover:bg-gray-50"
+                >
+                  + Text
+                </button>
+              </div>
 
-                {section.questions.length === 0 && (
-                  <p style={{ fontSize: "0.9rem" }}>No questions in this section.</p>
-                )}
-
-                {section.questions.map((q, qIndex) => (
+              <div className="space-y-2">
+                {sec.questions.map((q) => (
                   <div
                     key={q.id}
-                    style={{
-                      border: "1px solid #eee",
-                      borderRadius: "4px",
-                      padding: "0.5rem",
-                      marginBottom: "0.5rem",
-                    }}
+                    className="border rounded-xl p-3 bg-white grid md:grid-cols-12 gap-2 items-start text-xs"
                   >
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        marginBottom: "0.25rem",
-                      }}
-                    >
-                      <strong>
-                        Q{qIndex + 1}:{" "}
-                        <input
-                          type="text"
-                          value={q.label}
-                          onChange={(e) =>
-                            updateQuestionInSection(section.id, q.id, {
-                              label: e.target.value,
-                            })
-                          }
-                          style={{ marginLeft: "0.5rem", width: "70%" }}
-                        />
-                      </strong>
-                      <div>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            moveQuestionWithinSection(section.id, q.id, "up")
-                          }
-                          style={{ marginRight: "0.25rem" }}
-                        >
-                          ↑
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            moveQuestionWithinSection(section.id, q.id, "down")
-                          }
-                          style={{ marginRight: "0.25rem" }}
-                        >
-                          ↓
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            deleteQuestionFromSection(section.id, q.id)
-                          }
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-
-                    <div
-                      style={{
-                        display: "flex",
-                        flexWrap: "wrap",
-                        gap: "0.5rem",
-                        marginBottom: "0.5rem",
-                      }}
-                    >
-                      <label>
-                        Type{" "}
-                        <select
-                          value={q.type}
-                          onChange={(e) =>
-                            updateQuestionInSection(section.id, q.id, {
-                              type: e.target.value as QuestionType,
-                            })
-                          }
-                        >
-                          <option value="yes_no_na">Yes / No / N/A</option>
-                          <option value="good_fair_poor">
-                            Good / Fair / Poor
-                          </option>
-                          <option value="multiple_choice">
-                            Multiple Choice
-                          </option>
-                          <option value="text">Text</option>
-                        </select>
-                      </label>
-
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={q.allowNotes}
-                          onChange={(e) =>
-                            updateQuestionInSection(section.id, q.id, {
-                              allowNotes: e.target.checked,
-                            })
-                          }
-                        />{" "}
-                        Allow Notes
-                      </label>
-
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={q.allowPhoto}
-                          onChange={(e) =>
-                            updateQuestionInSection(section.id, q.id, {
-                              allowPhoto: e.target.checked,
-                            })
-                          }
-                        />{" "}
-                        Allow Photo
-                      </label>
-
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={q.required}
-                          onChange={(e) =>
-                            updateQuestionInSection(section.id, q.id, {
-                              required: e.target.checked,
-                            })
-                          }
-                        />{" "}
-                        Required
-                      </label>
-                    </div>
-
-                    {q.type === "multiple_choice" && (
-                      <div style={{ marginTop: "0.25rem" }}>
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            marginBottom: "0.25rem",
-                          }}
-                        >
-                          <span>Options</span>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              addQuestionOption(section.id, q.id)
+                    <div className="md:col-span-5 space-y-1">
+                      <input
+                        value={q.label}
+                        onChange={(e) =>
+                          updateQuestion(sec.id, q.id, {
+                            label: e.target.value,
+                          })
+                        }
+                        className="w-full border rounded-xl px-3 py-1 text-sm"
+                        placeholder="Question text"
+                      />
+                      <div className="flex flex-wrap gap-3">
+                        <label className="inline-flex items-center gap-1">
+                          <input
+                            type="checkbox"
+                            checked={q.required}
+                            onChange={(e) =>
+                              updateQuestion(sec.id, q.id, {
+                                required: e.target.checked,
+                              })
                             }
-                          >
-                            Add Option
-                          </button>
-                        </div>
-                        {(q.options || []).map((opt, optIndex) => (
-                          <div
-                            key={optIndex}
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              marginBottom: "0.25rem",
-                            }}
-                          >
-                            <input
-                              type="text"
-                              value={opt}
-                              onChange={(e) =>
-                                updateQuestionOption(
-                                  section.id,
-                                  q.id,
-                                  optIndex,
-                                  e.target.value
-                                )
-                              }
-                              style={{ flex: 1, marginRight: "0.25rem" }}
-                            />
-                            <button
-                              type="button"
-                              onClick={() =>
-                                removeQuestionOption(
-                                  section.id,
-                                  q.id,
-                                  optIndex
-                                )
-                              }
-                            >
-                              ✕
-                            </button>
-                          </div>
-                        ))}
-                        {(!q.options || q.options.length === 0) && (
-                          <p style={{ fontSize: "0.85rem" }}>
-                            No options yet.
-                          </p>
-                        )}
+                          />
+                          <span>Required</span>
+                        </label>
+                        <label className="inline-flex items-center gap-1">
+                          <input
+                            type="checkbox"
+                            checked={q.allowNotes}
+                            onChange={(e) =>
+                              updateQuestion(sec.id, q.id, {
+                                allowNotes: e.target.checked,
+                              })
+                            }
+                          />
+                          <span>Allow notes</span>
+                        </label>
+                        <label className="inline-flex items-center gap-1">
+                          <input
+                            type="checkbox"
+                            checked={q.allowPhoto}
+                            onChange={(e) =>
+                              updateQuestion(sec.id, q.id, {
+                                allowPhoto: e.target.checked,
+                              })
+                            }
+                          />
+                          <span>Allow photos</span>
+                        </label>
                       </div>
-                    )}
+                    </div>
+
+                    <div className="md:col-span-3">
+                      <label className="block text-[11px] text-gray-500 mb-1">
+                        Answer type
+                      </label>
+                      <select
+                        value={q.type}
+                        onChange={(e) =>
+                          updateQuestion(sec.id, q.id, {
+                            type: e.target.value as QuestionType,
+                            options:
+                              e.target.value === "multiple_choice"
+                                ? q.options && q.options.length
+                                  ? q.options
+                                  : ["Option 1", "Option 2"]
+                                : [],
+                          })
+                        }
+                        className="w-full border rounded-xl px-3 py-1"
+                      >
+                        <option value="yes_no_na">Yes / No / N/A</option>
+                        <option value="good_fair_poor">
+                          Good / Fair / Poor
+                        </option>
+                        <option value="multiple_choice">
+                          Multiple choice
+                        </option>
+                        <option value="text">Text</option>
+                      </select>
+                    </div>
+
+                    <div className="md:col-span-3">
+                      {q.type === "multiple_choice" && (
+                        <>
+                          <label className="block text-[11px] text-gray-500 mb-1">
+                            Options (comma separated)
+                          </label>
+                          <input
+                            value={(q.options || []).join(", ")}
+                            onChange={(e) => {
+                              const raw = e.target.value;
+                              const arr = raw
+                                .split(",")
+                                .map((s) => s.trim())
+                                .filter(Boolean);
+                              updateQuestion(sec.id, q.id, {
+                                options: arr,
+                              });
+                            }}
+                            className="w-full border rounded-xl px-3 py-1"
+                            placeholder="e.g. Red, Amber, Green"
+                          />
+                        </>
+                      )}
+                      {q.type !== "multiple_choice" && (
+                        <p className="text-[11px] text-gray-400">
+                          No extra configuration.
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="md:col-span-1 flex justify-end">
+                      <button
+                        onClick={() => removeQuestion(sec.id, q.id)}
+                        className="px-2 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
+                      >
+                        ✕
+                      </button>
+                    </div>
                   </div>
                 ))}
+                {sec.questions.length === 0 && (
+                  <div className="text-[11px] text-gray-500">
+                    No questions yet. Use the buttons above to add some.
+                  </div>
+                )}
               </div>
-            ))}
-
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "flex-end",
-                gap: "0.5rem",
-                marginTop: "1rem",
-              }}
-            >
-              <button type="button" onClick={closeModal} disabled={saving}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleSaveTemplate}
-                disabled={saving}
-              >
-                {saving ? "Saving…" : "Save Template"}
-              </button>
             </div>
-          </div>
+          ))}
         </div>
-      )}
+
+        <div className="flex justify-between items-center">
+          <button
+            onClick={addSection}
+            className="px-3 py-2 rounded-xl border text-xs hover:bg-gray-50"
+          >
+            + Add section
+          </button>
+          <p className="text-[11px] text-gray-500">
+            Tip: Use sections for areas (e.g. “External area”, “Warehouse
+            aisles”) and add images to guide inspectors.
+          </p>
+        </div>
+      </div>
     </div>
   );
 }
