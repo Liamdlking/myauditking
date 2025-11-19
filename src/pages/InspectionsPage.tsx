@@ -209,11 +209,16 @@ export default function InspectionsPage() {
     setAnswers([]);
 
     try {
-      const { data, error } = await supabase
+            const { data, error } = await supabase
         .from("templates")
-        .select("definition")
+        .select("definition, logo_data_url")
         .eq("id", insp.template_id)
         .single();
+      const def: TemplateDefinition =
+        (data?.definition as TemplateDefinition) || { sections: [] };
+
+      const logo = (data as any)?.logo_data_url as string | null | undefined;
+      setTemplateLogo(logo || null);
 
       if (error) throw error;
 
@@ -257,9 +262,10 @@ export default function InspectionsPage() {
     }
   };
 
-  const closeInspectionModal = () => {
+    const closeInspectionModal = () => {
     setActiveInspection(null);
     setActiveDefinition(null);
+    setTemplateLogo(null);
     setAnswers([]);
     setModalLoading(false);
     setModalSaving(false);
