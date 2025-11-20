@@ -1,4 +1,4 @@
-lol import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import jsPDF from "jspdf";
 import { supabase } from "@/utils/supabaseClient";
 
