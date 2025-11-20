@@ -3,19 +3,15 @@ import { useNavigate } from "react-router-dom";
 import { supabase } from "@/utils/supabaseClient";
 import ImportTemplateFromPdfModal from "@/components/ImportTemplateFromPdfModal";
 
-// ---------------------------
-// Types
-// ---------------------------
+type Role = "admin" | "manager" | "inspector" | string | null;
+
 type TemplateRow = {
   id: string;
   name: string;
   description: string | null;
   site_id: string | null;
-  logo_data_url: string | null;
   is_published: boolean;
-  definition: any | null;
-  created_at: string | null;
-  updated_at: string | null;
+  logo_data_url?: string | null;
 };
 
 type SiteRow = {
@@ -23,112 +19,115 @@ type SiteRow = {
   name: string;
 };
 
-type ProfileRow = {
-  user_id: string;
-  name: string;
-  role: string;
-};
-
-// ---------------------------
-// PAGE
-// ---------------------------
 export default function TemplatesPage() {
-  const navigate = useNavigate();
+  const [role, setRole] = useState<Role>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
 
-  // USER
-  const [currentUser, setCurrentUser] = useState<ProfileRow | null>(null);
-  const [loadingUser, setLoadingUser] = useState(true);
-
-  // DATA
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
   const [sites, setSites] = useState<SiteRow[]>([]);
-  const [loadingTemplates, setLoadingTemplates] = useState(false);
-  const [errorText, setErrorText] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // FILTER UI
-  const [search, setSearch] = useState("");
-  const [siteFilter, setSiteFilter] = useState("");
+  const [selectedSiteId, setSelectedSiteId] = useState<string>("all");
+  const [publishedFilter, setPublishedFilter] = useState<
+    "all" | "published" | "unpublished"
+  >("all");
 
-  // MODALS
   const [showImportModal, setShowImportModal] = useState(false);
 
-  const canCreate =
-    currentUser && (currentUser.role === "manager" || currentUser.role === "admin");
+  const navigate = useNavigate();
 
-  const canDelete = currentUser && currentUser.role === "admin";
+  const isAdmin = role === "admin";
+  const isManager = role === "manager";
+  const canEdit = isAdmin || isManager;
 
-  // ---------------------------
-  // Load current user
-  // ---------------------------
+  // --------------------------
+  // Load current user + role
+  // --------------------------
   useEffect(() => {
-    let active = true;
-    async function run() {
-      setLoadingUser(true);
+    const loadUser = async () => {
+      try {
+        const { data: userData } = await supabase.auth.getUser();
+        const user = userData?.user;
+        if (!user) {
+          setCurrentUserId(null);
+          setRole(null);
+          return;
+        }
+        setCurrentUserId(user.id);
 
-      const { data: sessionData } = await supabase.auth.getSession();
-      const session = sessionData.session;
+        const { data: profile, error: profileError } = await supabase
+          .from("profiles")
+          .select("role")
+          .eq("user_id", user.id)
+          .single();
 
-      if (!session) {
-        if (active) setCurrentUser(null);
-        return;
+        if (!profileError && profile) {
+          setRole((profile.role as Role) || "inspector");
+        } else {
+          setRole("inspector");
+        }
+      } catch (e) {
+        console.error("loadUser error", e);
+        setRole("inspector");
       }
-
-      // IMPORTANT: Select using user_id not id
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("user_id, name, role")
-        .eq("user_id", session.user.id)
-        .single();
-
-      if (!error && data) {
-        if (active)
-          setCurrentUser({
-            user_id: data.user_id,
-            name: data.name,
-            role: data.role,
-          });
-      } else {
-        // default to inspector if profile missing
-        if (active)
-          setCurrentUser({
-            user_id: session.user.id,
-            name: session.user.email ?? "",
-            role: "inspector",
-          });
-      }
-
-      if (active) setLoadingUser(false);
-    }
-    run();
-    return () => {
-      active = false;
     };
+
+    loadUser();
   }, []);
 
-  // ---------------------------
-  // Load Sites
-  // ---------------------------
+  // --------------------------
+  // Load sites + templates
+  // --------------------------
   const loadSites = async () => {
-    const { data, error } = await supabase.from("sites").select("id,name");
-    if (!error) setSites(data || []);
+    try {
+      const { data, error } = await supabase
+        .from("sites")
+        .select("id, name")
+        .order("name", { ascending: true });
+
+      if (error) throw error;
+      setSites(
+        (data || []).map((s: any) => ({
+          id: s.id,
+          name: s.name,
+        }))
+      );
+    } catch (e) {
+      console.error("loadSites error", e);
+    }
   };
 
-  // ---------------------------
-  // Load Templates
-  // ---------------------------
   const loadTemplates = async () => {
-    setLoadingTemplates(true);
-    const { data, error } = await supabase
-      .from("templates")
-      .select("*")
-      .order("updated_at", { ascending: false });
+    setLoading(true);
+    setError(null);
+    try {
+      const { data, error } = await supabase
+        .from("templates")
+        .select("id, name, description, site_id, is_published, logo_data_url")
+        .order("name", { ascending: true });
 
-    if (error) {
-      setErrorText(error.message);
-    } else {
-      setTemplates(data || []);
+      if (error) throw error;
+
+      const mapped: TemplateRow[] = (data || []).map((t: any) => ({
+        id: t.id,
+        name: t.name,
+        description: t.description ?? null,
+        site_id: t.site_id ?? null,
+        is_published: !!t.is_published,
+        logo_data_url: t.logo_data_url ?? null,
+      }));
+
+      setTemplates(mapped);
+    } catch (e: any) {
+      console.error("loadTemplates error", e);
+      setError(
+        e?.message ||
+          "Could not load templates. Check the templates table schema."
+      );
+    } finally {
+      setLoading(false);
     }
-    setLoadingTemplates(false);
   };
 
   useEffect(() => {
@@ -136,198 +135,298 @@ export default function TemplatesPage() {
     loadTemplates();
   }, []);
 
-  const sitesMap = useMemo(() => {
-    const m: Record<string, string> = {};
-    sites.forEach((s) => (m[s.id] = s.name));
-    return m;
-  }, [sites]);
-
-  // FILTERING
-  const filteredTemplates = useMemo(() => {
-    return templates.filter((t) => {
-      const matchesSearch =
-        !search ||
-        t.name.toLowerCase().includes(search.toLowerCase()) ||
-        (t.description || "").toLowerCase().includes(search.toLowerCase());
-
-      const matchesSite = !siteFilter || t.site_id === siteFilter;
-
-      return matchesSearch && matchesSite;
-    });
-  }, [templates, search, siteFilter]);
-
-  const questionCounts = (tpl: TemplateRow) => {
-    if (!tpl.definition || !tpl.definition.sections) return 0;
-
-    return tpl.definition.sections.reduce(
-      (total: number, sec: any) =>
-        total + (sec.items ? sec.items.length : 0),
-      0
-    );
+  // --------------------------
+  // Helpers
+  // --------------------------
+  const siteNameFor = (site_id: string | null) => {
+    if (!site_id) return "All sites";
+    const s = sites.find((x) => x.id === site_id);
+    return s ? s.name : "Unknown site";
   };
 
-  const openNewTemplate = () => {
+  const filteredTemplates = useMemo(() => {
+    return templates.filter((tpl) => {
+      if (selectedSiteId !== "all" && tpl.site_id !== selectedSiteId) {
+        return false;
+      }
+      if (publishedFilter === "published" && !tpl.is_published) {
+        return false;
+      }
+      if (publishedFilter === "unpublished" && tpl.is_published) {
+        return false;
+      }
+      return true;
+    });
+  }, [templates, selectedSiteId, publishedFilter]);
+
+  // --------------------------
+  // Actions
+  // --------------------------
+  const handleNewTemplate = () => {
+    if (!canEdit) {
+      alert("Only managers/admins can create templates.");
+      return;
+    }
     navigate("/templates/new");
   };
 
-  const openEditTemplate = (id: string) => {
-    navigate(`/templates/${id}`);
+  const handleEditTemplate = (id: string) => {
+    if (!canEdit) {
+      alert("Only managers/admins can edit templates.");
+      return;
+    }
+    navigate(`/templates/${id}/edit`);
   };
 
-  const startInspection = (id: string) => {
-    navigate(`/inspections?templateId=${id}`);
+  const handleTogglePublished = async (tpl: TemplateRow) => {
+    if (!canEdit) {
+      alert("Only managers/admins can change publish state.");
+      return;
+    }
+    try {
+      const next = !tpl.is_published;
+      const { error } = await supabase
+        .from("templates")
+        .update({ is_published: next })
+        .eq("id", tpl.id);
+
+      if (error) throw error;
+      setTemplates((prev) =>
+        prev.map((t) =>
+          t.id === tpl.id ? { ...t, is_published: next } : t
+        )
+      );
+    } catch (e: any) {
+      console.error("togglePublished error", e);
+      alert(e?.message || "Could not update template publish state.");
+    }
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm("Delete this template?")) return;
+  const handleStartInspection = async (tpl: TemplateRow) => {
+    try {
+      const { data: userData } = await supabase.auth.getUser();
+      const user = userData?.user;
+      if (!user) {
+        alert("Please log in first.");
+        return;
+      }
 
-    const { error } = await supabase.from("templates").delete().eq("id", id);
-    if (error) return alert(error.message);
+      // Load profile for display name
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("name")
+        .eq("user_id", user.id)
+        .single();
 
-    setTemplates((prev) => prev.filter((t) => t.id !== id));
+      const ownerName =
+        profile?.name || user.email || "Inspector";
+
+      const nowIso = new Date().toISOString();
+
+      const { data, error } = await supabase
+        .from("inspections")
+        .insert({
+          template_id: tpl.id,
+          template_name: tpl.name,
+          site_id: tpl.site_id,
+          site: siteNameFor(tpl.site_id),
+          status: "in_progress",
+          started_at: nowIso,
+          submitted_at: null,
+          score: null,
+          items: null,
+          owner_user_id: user.id,
+          owner_name: ownerName,
+        })
+        .select("id")
+        .single();
+
+      if (error) throw error;
+
+      // Go to inspections page; user can open + complete it there
+      navigate("/inspections");
+    } catch (e: any) {
+      console.error("startInspection error", e);
+      alert(
+        e?.message || "Could not start inspection. Check the inspections table."
+      );
+    }
   };
 
-  // ---------------------------
-  // RENDER
-  // ---------------------------
-  if (loadingUser) return <>Loading…</>;
-
+  // --------------------------
+  // Render
+  // --------------------------
   return (
-    <>
-      <div className="p-6 space-y-4">
-        {/* HEADER */}
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-          <div>
-            <h1 className="text-2xl font-bold text-purple-700">Templates</h1>
-            <p className="text-xs text-gray-600">
-              Create, manage, assign and import inspection templates.
+    <div className="max-w-6xl mx-auto py-6 space-y-4">
+      {/* Header */}
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-purple-700">
+            Templates
+          </h1>
+          <p className="text-sm text-gray-600">
+            Create, import and manage templates. Start inspections from
+            any template.
+          </p>
+          {role && (
+            <p className="text-[11px] text-gray-400 mt-1">
+              Your role: <span className="font-medium">{role}</span>
             </p>
-          </div>
-
-          <div className="flex gap-2 text-xs">
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search…"
-              className="border rounded-xl px-3 py-2 text-xs"
-            />
-
-            <select
-              value={siteFilter}
-              onChange={(e) => setSiteFilter(e.target.value)}
-              className="border rounded-xl px-3 py-2 text-xs"
-            >
-              <option value="">All Sites</option>
-              {sites.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-
-            {canCreate && (
-              <>
-                <button
-                  onClick={() => setShowImportModal(true)}
-                  className="border rounded-xl px-3 py-2 hover:bg-gray-50"
-                >
-                  Import PDF
-                </button>
-                <button
-                  onClick={openNewTemplate}
-                  className="rounded-xl px-3 py-2 bg-purple-700 text-white hover:bg-purple-800"
-                >
-                  New Template
-                </button>
-              </>
-            )}
-          </div>
+          )}
         </div>
 
-        {/* LIST */}
-        {filteredTemplates.length === 0 && (
-          <div className="text-xs text-gray-500">No templates found.</div>
-        )}
+        <div className="flex flex-wrap gap-2 justify-end">
+          {(isAdmin || isManager) && (
+            <>
+              <button
+                onClick={() => setShowImportModal(true)}
+                className="px-3 py-2 rounded-xl border text-sm hover:bg-gray-50"
+              >
+                Import from PDF
+              </button>
+              <button
+                onClick={handleNewTemplate}
+                className="px-3 py-2 rounded-xl bg-purple-700 text-white text-sm hover:bg-purple-800"
+              >
+                + New Template
+              </button>
+            </>
+          )}
+        </div>
+      </div>
 
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+      {/* Filters */}
+      <div className="flex flex-wrap gap-3 items-center text-xs">
+        <div className="flex items-center gap-1">
+          <span className="text-gray-500">Site:</span>
+          <select
+            value={selectedSiteId}
+            onChange={(e) => setSelectedSiteId(e.target.value)}
+            className="border rounded-xl px-3 py-1"
+          >
+            <option value="all">All sites</option>
+            {sites.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex items-center gap-1">
+          <span className="text-gray-500">Status:</span>
+          <select
+            value={publishedFilter}
+            onChange={(e) =>
+              setPublishedFilter(
+                e.target.value as "all" | "published" | "unpublished"
+              )
+            }
+            className="border rounded-xl px-3 py-1"
+          >
+            <option value="all">All</option>
+            <option value="published">Published</option>
+            <option value="unpublished">Unpublished</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Error / loading / list */}
+      {error && (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="rounded-xl border bg-white p-4 text-sm text-gray-600">
+          Loading templates…
+        </div>
+      ) : filteredTemplates.length === 0 ? (
+        <div className="rounded-xl border bg-white p-4 text-sm text-gray-600">
+          No templates found for the current filters.
+        </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {filteredTemplates.map((tpl) => (
             <div
               key={tpl.id}
-              className="bg-white border rounded-2xl p-4 flex flex-col gap-3 shadow-sm"
+              className="border rounded-2xl bg-white p-4 space-y-3 shadow-sm"
             >
-              <div className="flex gap-3">
-                {tpl.logo_data_url ? (
+              <div className="flex items-center gap-3">
+                {tpl.logo_data_url && (
                   <img
                     src={tpl.logo_data_url}
-                    className="w-12 h-12 rounded-full border object-cover"
+                    alt={tpl.name}
+                    className="h-10 w-10 rounded-md object-cover border bg-white flex-shrink-0"
                   />
-                ) : (
-                  <div className="w-12 h-12 rounded-full bg-gray-100 border flex items-center justify-center text-[10px]">
-                    Logo
-                  </div>
                 )}
-
-                <div className="flex-1">
-                  <div className="font-semibold text-sm">{tpl.name}</div>
-                  <div className="text-[11px] text-gray-600 line-clamp-2">
-                    {tpl.description}
-                  </div>
-                  <div className="text-[11px] text-gray-500">
-                    {tpl.site_id ? sitesMap[tpl.site_id] : "No site"} •{" "}
-                    {questionCounts(tpl)} questions
+                <div>
+                  <h2 className="font-semibold text-gray-900">
+                    {tpl.name}
+                  </h2>
+                  <div className="flex flex-wrap gap-2 items-center text-[11px] mt-1">
+                    <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-700 px-2 py-0.5">
+                      {siteNameFor(tpl.site_id)}
+                    </span>
+                    <span
+                      className={`inline-flex items-center rounded-full px-2 py-0.5 ${
+                        tpl.is_published
+                          ? "bg-emerald-50 text-emerald-700 border border-emerald-100"
+                          : "bg-amber-50 text-amber-700 border border-amber-100"
+                      }`}
+                    >
+                      {tpl.is_published ? "Published" : "Unpublished"}
+                    </span>
                   </div>
                 </div>
               </div>
 
-              {/* BUTTONS */}
-              <div className="flex justify-between text-[11px] items-center">
-                <div className="text-gray-400">
-                  {tpl.updated_at
-                    ? "Updated " + tpl.updated_at.slice(0, 10)
-                    : ""}
-                </div>
+              {tpl.description && (
+                <p className="text-xs text-gray-600 line-clamp-3">
+                  {tpl.description}
+                </p>
+              )}
 
-                <div className="flex gap-1">
-                  <button
-                    onClick={() => startInspection(tpl.id)}
-                    className="px-2 py-1 rounded-xl border bg-purple-50 text-purple-700 hover:bg-purple-100"
-                  >
-                    Start
-                  </button>
-
-                  {canCreate && (
+              <div className="flex gap-2 text-xs">
+                <button
+                  onClick={() => handleStartInspection(tpl)}
+                  className="flex-1 px-3 py-1 rounded-xl border hover:bg-gray-50"
+                >
+                  Start inspection
+                </button>
+                {canEdit && (
+                  <>
                     <button
-                      onClick={() => openEditTemplate(tpl.id)}
-                      className="px-2 py-1 rounded-xl border hover:bg-gray-50"
+                      onClick={() => handleEditTemplate(tpl.id)}
+                      className="px-3 py-1 rounded-xl border hover:bg-gray-50"
                     >
                       Edit
                     </button>
-                  )}
-
-                  {canDelete && (
                     <button
-                      onClick={() => handleDelete(tpl.id)}
-                      className="px-2 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
+                      onClick={() => handleTogglePublished(tpl)}
+                      className="px-3 py-1 rounded-xl border hover:bg-gray-50"
                     >
-                      Delete
+                      {tpl.is_published ? "Unpublish" : "Publish"}
                     </button>
-                  )}
-                </div>
+                  </>
+                )}
               </div>
             </div>
           ))}
         </div>
-      </div>
+      )}
 
-      {/* Import Modal */}
+      {/* Import from PDF modal */}
       {showImportModal && (
         <ImportTemplateFromPdfModal
-          open={showImportModal}
           onClose={() => setShowImportModal(false)}
-          onCreated={loadTemplates}
+          onTemplateCreated={() => {
+            setShowImportModal(false);
+            loadTemplates();
+          }}
         />
       )}
-    </>
+    </div>
   );
 }
