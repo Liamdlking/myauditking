@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/utils/supabaseClient";
+import ImportTemplateFromPdfModal from "@/components/ImportTemplateFromPdfModal";
 
 type Role = "admin" | "manager" | "inspector" | string | null;
 
