@@ -41,6 +41,9 @@ type InspectionItem = {
   notes: string | null;
   photos: string[];
   required: boolean;
+  // NEW: attribution
+  answered_by_user_id?: string | null;
+  answered_by_name?: string | null;
 };
 
 type InspectionRow = {
@@ -75,6 +78,9 @@ type ModalAnswer = {
   notes: string | null;
   photos: string[];
   required: boolean;
+  // NEW: attribution
+  answered_by_user_id: string | null;
+  answered_by_name: string | null;
 };
 
 function formatDateTime(iso: string | null) {
@@ -91,6 +97,7 @@ export default function InspectionsPage() {
   const [roleLoading, setRoleLoading] = useState(true);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [currentUserName, setCurrentUserName] = useState<string | null>(null);
+  const [siteAccess, setSiteAccess] = useState<string[] | null>(null); // null = no restriction
 
   const [sites, setSites] = useState<SiteRow[]>([]);
   const [inspections, setInspections] = useState<InspectionRow[]>([]);
@@ -117,7 +124,7 @@ export default function InspectionsPage() {
   const [autoStartDone, setAutoStartDone] = useState(false);
 
   // --------------------------
-  // Load user + role
+  // Load user + role + site access
   // --------------------------
   useEffect(() => {
     const loadUserRole = async () => {
@@ -129,26 +136,31 @@ export default function InspectionsPage() {
           setCurrentUserId(null);
           setCurrentUserName(null);
           setRole(null);
+          setSiteAccess(null);
           return;
         }
         setCurrentUserId(user.id);
 
         const { data, error } = await supabase
           .from("profiles")
-          .select("role,name")
+          .select("role,name,site_access")
           .eq("user_id", user.id)
           .single();
 
         if (!error && data) {
           setRole((data.role as Role) || "inspector");
           setCurrentUserName(data.name || user.email || "");
+          // if site_access is null, treat as "all sites" (no restriction)
+          setSiteAccess(Array.isArray(data.site_access) ? data.site_access : null);
         } else {
           setRole("inspector");
           setCurrentUserName(user.email || "");
+          setSiteAccess(null);
         }
       } catch {
         setRole("inspector");
         setCurrentUserName(null);
+        setSiteAccess(null);
       } finally {
         setRoleLoading(false);
       }
@@ -332,9 +344,19 @@ export default function InspectionsPage() {
   // --------------------------
   const filteredInspections = useMemo(() => {
     return inspections.filter((insp) => {
-      if (!canSeeAll && currentUserId && insp.owner_user_id !== currentUserId) {
-        return false;
+      // Restrict by site ACL for non-admin/manager
+      if (!canSeeAll) {
+        if (
+          siteAccess &&
+          siteAccess.length > 0 &&
+          insp.site_id &&
+          !siteAccess.includes(insp.site_id)
+        ) {
+          return false;
+        }
+        // if siteAccess is null or empty, treat as "all sites allowed"
       }
+
       if (selectedSiteId !== "all" && insp.site_id !== selectedSiteId) {
         return false;
       }
@@ -343,7 +365,7 @@ export default function InspectionsPage() {
       }
       return true;
     });
-  }, [inspections, canSeeAll, currentUserId, selectedSiteId, statusFilter]);
+  }, [inspections, canSeeAll, siteAccess, selectedSiteId, statusFilter]);
 
   const inProgress = filteredInspections.filter(
     (i) => i.status === "in_progress"
@@ -437,6 +459,8 @@ export default function InspectionsPage() {
             notes: existing ? existing.notes : null,
             photos: existing ? existing.photos || [] : [],
             required: q.required,
+            answered_by_user_id: existing?.answered_by_user_id ?? null,
+            answered_by_name: existing?.answered_by_name ?? null,
           });
         }
       }
@@ -466,11 +490,30 @@ export default function InspectionsPage() {
   };
 
   // --------------------------
-  // Update answers state
+  // Update answers state (with attribution)
   // --------------------------
   const updateAnswer = (index: number, patch: Partial<ModalAnswer>) => {
     setAnswers((prev) =>
-      prev.map((a, i) => (i === index ? { ...a, ...patch } : a))
+      prev.map((a, i) => {
+        if (i !== index) return a;
+        const next = { ...a, ...patch };
+
+        const changed =
+          (patch.value !== undefined && patch.value !== a.value) ||
+          (patch.choice_key !== undefined &&
+            patch.choice_key !== a.choice_key) ||
+          (patch.choice_label !== undefined &&
+            patch.choice_label !== a.choice_label) ||
+          (patch.notes !== undefined && patch.notes !== a.notes) ||
+          (patch.photos !== undefined && patch.photos !== a.photos);
+
+        if (changed) {
+          next.answered_by_user_id = currentUserId;
+          next.answered_by_name = currentUserName || null;
+        }
+
+        return next;
+      })
     );
   };
 
@@ -480,9 +523,16 @@ export default function InspectionsPage() {
     reader.onload = () => {
       const url = String(reader.result);
       setAnswers((prev) =>
-        prev.map((a, i) =>
-          i === index ? { ...a, photos: [...a.photos, url] } : a
-        )
+        prev.map((a, i) => {
+          if (i !== index) return a;
+          const photos = [...a.photos, url];
+          return {
+            ...a,
+            photos,
+            answered_by_user_id: currentUserId,
+            answered_by_name: currentUserName || null,
+          };
+        })
       );
     };
     reader.readAsDataURL(file);
@@ -534,6 +584,8 @@ export default function InspectionsPage() {
       notes: a.notes,
       photos: a.photos,
       required: a.required,
+      answered_by_user_id: a.answered_by_user_id,
+      answered_by_name: a.answered_by_name,
     }));
   };
 
@@ -720,6 +772,14 @@ export default function InspectionsPage() {
         if (a.photos && a.photos.length > 0) {
           y = addTextWrapped(
             `Photos attached: ${a.photos.length}`,
+            20,
+            y
+          );
+        }
+
+        if (a.answered_by_name) {
+          y = addTextWrapped(
+            `Last answered by: ${a.answered_by_name}`,
             20,
             y
           );
@@ -930,6 +990,13 @@ export default function InspectionsPage() {
                 y
               );
             }
+            if (it.answered_by_name) {
+              y = addTextWrapped(
+                `Last answered by: ${it.answered_by_name}`,
+                20,
+                y
+              );
+            }
             y += 3;
           }
 
@@ -964,9 +1031,9 @@ export default function InspectionsPage() {
             Start, continue and complete inspections. Save in progress and
             export branded PDF reports.
           </p>
-          {!roleLoading && !canSeeAll && (
+          {!roleLoading && (
             <p className="text-[11px] text-gray-400 mt-1">
-              You are an inspector – you’ll only see inspections you own.
+              You can see inspections for the sites you have access to.
             </p>
           )}
         </div>
@@ -1180,15 +1247,25 @@ export default function InspectionsPage() {
                                       </span>
                                     )}
                                   </div>
-                                  <div className="text-[10px] text-gray-400">
-                                    {q.type === "yes_no_na" &&
-                                      "Yes / No / N/A"}
-                                    {q.type === "good_fair_poor" &&
-                                      "Good / Fair / Poor"}
-                                    {q.type === "multiple_choice" &&
-                                      "Multiple choice"}
-                                    {q.type === "text" &&
-                                      "Text response"}
+                                  <div className="text-right space-y-1">
+                                    <div className="text-[10px] text-gray-400">
+                                      {q.type === "yes_no_na" &&
+                                        "Yes / No / N/A"}
+                                      {q.type === "good_fair_poor" &&
+                                        "Good / Fair / Poor"}
+                                      {q.type === "multiple_choice" &&
+                                        "Multiple choice"}
+                                      {q.type === "text" &&
+                                        "Text response"}
+                                    </div>
+                                    {a.answered_by_name && (
+                                      <div className="text-[10px] text-gray-400">
+                                        Last answered by:{" "}
+                                        <span className="font-medium">
+                                          {a.answered_by_name}
+                                        </span>
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
 
@@ -1364,11 +1441,11 @@ export default function InspectionsPage() {
                       </div>
                       <div className="text-gray-600">
                         Status:{" "}
-                        <span className="font-medium">
-                          {activeInspection.status === "completed"
-                            ? "Completed"
-                            : "In progress"}
-                        </span>
+                          <span className="font-medium">
+                            {activeInspection.status === "completed"
+                              ? "Completed"
+                              : "In progress"}
+                          </span>
                       </div>
                       {activeInspection.score !== null && (
                         <div className="text-gray-600">
