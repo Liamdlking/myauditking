@@ -118,7 +118,7 @@ function AppShell() {
           <Route path="/actions" element={<ActionsPage />} />
           <Route path="/sites" element={<SitesPage />} />
           <Route path="/users" element={<UsersPage />} />
-          <Route path="/login" element={<Navigate to="/" replace />} />
+         <Route path="/login" element={<LoginPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
