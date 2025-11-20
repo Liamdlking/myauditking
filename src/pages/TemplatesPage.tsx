@@ -418,6 +418,7 @@ export default function TemplatesPage() {
       {/* Import from PDF modal */}
       {showImportModal && (
         <ImportTemplateFromPdfModal
+          open={showImportModal}
           onClose={() => setShowImportModal(false)}
           onCreated={() => {
             setShowImportModal(false);
