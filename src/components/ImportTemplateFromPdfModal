@@ -1,0 +1,486 @@
+import React, { useEffect, useState } from "react";
+import { supabase } from "@/utils/supabaseClient";
+
+type ParsedQuestionType = "yesno" | "gfp" | "multi" | "text";
+
+type ParsedQuestion = {
+  id: string;
+  label: string;
+  type: ParsedQuestionType;
+  required: boolean;
+  options?: string[];
+};
+
+type ParsedSection = {
+  id: string;
+  title: string;
+  items: ParsedQuestion[];
+};
+
+type SiteRow = {
+  id: string;
+  name: string;
+};
+
+interface ImportTemplateFromPdfModalProps {
+  open: boolean;
+  onClose: () => void;
+  /** Called after a template is successfully created so the list can refresh */
+  onCreated?: () => void;
+}
+
+/**
+ * Simple rule-based converter:
+ * - You upload a PDF (currently used only for naming)
+ * - Paste text from that PDF
+ * - We guess question types and build sections
+ * - Save straight into the `templates` table
+ *
+ * NOTE: We do NOT touch your existing template builder.
+ */
+export default function ImportTemplateFromPdfModal(
+  props: ImportTemplateFromPdfModalProps
+) {
+  const { open, onClose, onCreated } = props;
+
+  const [sites, setSites] = useState<SiteRow[]>([]);
+  const [loadingSites, setLoadingSites] = useState(false);
+
+  const [templateName, setTemplateName] = useState("");
+  const [siteId, setSiteId] = useState<string>("");
+  const [rawText, setRawText] = useState(
+    [
+      "WAREHOUSE – DAILY SAFETY CHECK",
+      "",
+      "Walkways clear and free of obstructions?",
+      "Emergency exits clearly marked and accessible?",
+      "Good / Fair / Poor: Housekeeping standard",
+      "Select PPE required: Helmet, Vest, Gloves, Boots",
+      "Notes / hazards observed",
+    ].join("\n")
+  );
+
+  const [sections, setSections] = useState<ParsedSection[]>([]);
+  const [parsing, setParsing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [errorText, setErrorText] = useState<string | null>(null);
+
+  // Helper: simple uuid
+  const makeId = () =>
+    (globalThis.crypto?.randomUUID?.() ??
+      Math.random().toString(36).slice(2, 10)) as string;
+
+  // Load sites for dropdown
+  const loadSites = async () => {
+    setLoadingSites(true);
+    try {
+      const { data, error } = await supabase
+        .from("sites")
+        .select("id,name")
+        .order("name", { ascending: true });
+
+      if (error) {
+        console.error(error);
+      } else {
+        setSites((data || []) as SiteRow[]);
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoadingSites(false);
+    }
+  };
+
+  useEffect(() => {
+    if (open) {
+      loadSites();
+    }
+  }, [open]);
+
+  // Very simple heuristics to turn text into sections + questions
+  const parseTextToSections = (text: string): ParsedSection[] => {
+    const lines = text
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+
+    const result: ParsedSection[] = [];
+    let currentSection: ParsedSection | null = null;
+
+    const isHeading = (line: string) => {
+      if (line.length < 4) return false;
+      const noPunct = line.replace(/[0-9.:]/g, "");
+      const ratioUpper =
+        noPunct.length > 0
+          ? noPunct.replace(/[^A-Z]/g, "").length / noPunct.length
+          : 0;
+      return ratioUpper > 0.6;
+    };
+
+    const parseQuestion = (line: string): ParsedQuestion => {
+      // Strip leading numbers / bullets
+      let text = line.replace(/^[0-9]+\.\s*/, "").replace(/^[-*•]\s*/, "").trim();
+
+      // Good/Fair/Poor scale
+      if (
+        /good/i.test(text) &&
+        /fair/i.test(text) &&
+        /poor/i.test(text)
+      ) {
+        return {
+          id: makeId(),
+          label: text,
+          type: "gfp",
+          required: false,
+        };
+      }
+
+      // Multi-choice: "Label: A, B, C" or "Label - A / B / C"
+      if (/[,:-]\s*.+[,/].+/.test(text)) {
+        const parts = text.split(/[:\-]/);
+        const label = parts[0].trim();
+        const rest = parts.slice(1).join(":").trim();
+        const options = rest
+          .split(/[,/]/)
+          .map((o) => o.trim())
+          .filter(Boolean);
+
+        if (options.length >= 2) {
+          return {
+            id: makeId(),
+            label: label || text,
+            type: "multi",
+            required: false,
+            options,
+          };
+        }
+      }
+
+      // Yes / No style if ends with ?
+      if (/\?\s*$/.test(text)) {
+        return {
+          id: makeId(),
+          label: text,
+          type: "yesno",
+          required: true,
+        };
+      }
+
+      // Fallback to free text
+      return {
+        id: makeId(),
+        label: text,
+        type: "text",
+        required: false,
+      };
+    };
+
+    for (const line of lines) {
+      if (isHeading(line)) {
+        currentSection = {
+          id: makeId(),
+          title: line,
+          items: [],
+        };
+        result.push(currentSection);
+        continue;
+      }
+
+      if (!currentSection) {
+        currentSection = {
+          id: makeId(),
+          title: "Imported section",
+          items: [],
+        };
+        result.push(currentSection);
+      }
+
+      currentSection.items.push(parseQuestion(line));
+    }
+
+    if (result.length === 0) {
+      result.push({
+        id: makeId(),
+        title: "Imported section",
+        items: [],
+      });
+    }
+
+    return result;
+  };
+
+  const handleParse = () => {
+    setErrorText(null);
+    setParsing(true);
+    try {
+      const secs = parseTextToSections(rawText);
+      setSections(secs);
+    } catch (err: any) {
+      console.error(err);
+      setErrorText("Could not parse text – please check the format.");
+    } finally {
+      setParsing(false);
+    }
+  };
+
+  const handleCreateTemplate = async () => {
+    setErrorText(null);
+
+    const name = templateName.trim();
+    if (!name) {
+      setErrorText("Template name is required.");
+      return;
+    }
+
+    if (!sections.length || sections.every((s) => s.items.length === 0)) {
+      setErrorText(
+        "No questions detected. Please check your text and click Parse again."
+      );
+      return;
+    }
+
+    setSaving(true);
+    try {
+      // We assume your `templates` table has:
+      // - name (text)
+      // - description (text, nullable)
+      // - site_id (uuid, nullable)
+      // - logo_data_url (text, nullable)
+      // - definition (jsonb)  <-- full structure
+      // - is_published (boolean, default false)
+      //
+      // If your column is named differently (e.g. `items` instead of `definition`),
+      // change the property below accordingly.
+      const definition = {
+        version: 1,
+        sections,
+      };
+
+      const { error } = await supabase.from("templates").insert({
+        name,
+        description: null,
+        site_id: siteId || null,
+        logo_data_url: null,
+        definition,
+        is_published: false,
+      } as any);
+
+      if (error) {
+        console.error(error);
+        setErrorText(
+          error.message ||
+            "Supabase error: check that your `templates` table has a `definition` jsonb column."
+        );
+        setSaving(false);
+        return;
+      }
+
+      if (onCreated) onCreated();
+      onClose();
+    } catch (err: any) {
+      console.error(err);
+      setErrorText("Unexpected error creating template.");
+      setSaving(false);
+    }
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40">
+      <div className="bg-white rounded-2xl shadow-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+        <div className="px-5 py-3 border-b flex items-center justify-between">
+          <div>
+            <div className="text-sm font-semibold text-gray-800">
+              Import template from PDF / text
+            </div>
+            <div className="text-xs text-gray-500">
+              Upload a PDF (for naming) and paste the checklist text. We&apos;ll
+              guess sections and question types.
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-xs px-3 py-1 rounded-xl border hover:bg-gray-50"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-auto p-5 grid gap-4 md:grid-cols-5">
+          {/* Left side: inputs */}
+          <div className="md:col-span-2 space-y-4">
+            <div className="space-y-2">
+              <label className="block text-xs text-gray-600">
+                Upload PDF (optional)
+              </label>
+              <label className="block border border-dashed rounded-xl px-3 py-6 text-center text-xs text-gray-500 cursor-pointer hover:bg-gray-50">
+                <input
+                  type="file"
+                  accept="application/pdf"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file && !templateName) {
+                      setTemplateName(
+                        file.name.replace(/\.pdf$/i, "") || "Imported template"
+                      );
+                    }
+                  }}
+                />
+                Click to choose a PDF file
+                <div className="mt-1 text-[11px] text-gray-400">
+                  For now, we use the file name. Please paste the text below.
+                </div>
+              </label>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-xs text-gray-600">
+                Template name *
+              </label>
+              <input
+                type="text"
+                value={templateName}
+                onChange={(e) => setTemplateName(e.target.value)}
+                className="w-full border rounded-xl px-3 py-2 text-sm"
+                placeholder="Warehouse Daily Safety Walkthrough"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-xs text-gray-600">Site</label>
+              <select
+                value={siteId}
+                onChange={(e) => setSiteId(e.target.value)}
+                className="w-full border rounded-xl px-3 py-2 text-sm"
+              >
+                <option value="">
+                  {loadingSites ? "Loading sites…" : "No specific site"}
+                </option>
+                {sites.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+              <div className="text-[11px] text-gray-400">
+                Optional. If set, this template will default to that site.
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-xs text-gray-600">
+                Checklist text (copied from your PDF) *
+              </label>
+              <textarea
+                value={rawText}
+                onChange={(e) => setRawText(e.target.value)}
+                className="w-full border rounded-xl px-3 py-2 text-xs min-h-[180px]"
+              />
+              <div className="text-[11px] text-gray-400 space-y-1">
+                <p>Tips:</p>
+                <ul className="list-disc pl-4 space-y-1">
+                  <li>Lines in ALL CAPS become section headers.</li>
+                  <li>Lines ending with <code>?</code> become Yes/No questions.</li>
+                  <li>
+                    Lines containing <code>Good / Fair / Poor</code> become rating
+                    questions.
+                  </li>
+                  <li>
+                    Lines like <code>Label: A, B, C</code> or{" "}
+                    <code>Label - A / B / C</code> become multi-choice.
+                  </li>
+                </ul>
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={handleParse}
+                disabled={parsing}
+                className="px-3 py-2 rounded-xl border text-xs hover:bg-gray-50 disabled:opacity-50"
+              >
+                {parsing ? "Parsing…" : "Parse text"}
+              </button>
+            </div>
+
+            {errorText && (
+              <div className="text-xs text-rose-600 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">
+                {errorText}
+              </div>
+            )}
+          </div>
+
+          {/* Right side: preview */}
+          <div className="md:col-span-3 flex flex-col">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-xs font-semibold text-gray-700">
+                Preview ({sections.reduce((acc, s) => acc + s.items.length, 0)}{" "}
+                questions)
+              </div>
+              <button
+                onClick={handleCreateTemplate}
+                disabled={saving || sections.length === 0}
+                className="px-3 py-2 rounded-xl bg-purple-700 text-white text-xs hover:bg-purple-800 disabled:opacity-50"
+              >
+                {saving ? "Creating template…" : "Create template"}
+              </button>
+            </div>
+            <div className="flex-1 border rounded-xl p-3 overflow-auto bg-gray-50 text-xs">
+              {sections.length === 0 && (
+                <div className="text-gray-500">
+                  No questions yet. Paste your text on the left and click{" "}
+                  <strong>Parse text</strong>.
+                </div>
+              )}
+
+              {sections.map((sec) => (
+                <div key={sec.id} className="mb-4">
+                  <div className="font-semibold text-gray-800 mb-1">
+                    {sec.title}
+                  </div>
+                  {sec.items.length === 0 && (
+                    <div className="text-[11px] text-gray-500 mb-2">
+                      (No questions detected in this section)
+                    </div>
+                  )}
+                  <ul className="space-y-1">
+                    {sec.items.map((q, idx) => (
+                      <li
+                        key={q.id}
+                        className="bg-white rounded-lg border px-2 py-1 flex flex-col gap-0.5"
+                      >
+                        <div className="flex justify-between items-center">
+                          <span>
+                            {idx + 1}. {q.label}
+                          </span>
+                          <span className="text-[10px] text-gray-500">
+                            {q.type === "yesno" && "Yes/No"}
+                            {q.type === "gfp" && "Good/Fair/Poor"}
+                            {q.type === "multi" && "Multi-choice"}
+                            {q.type === "text" && "Text"}
+                            {q.required && " • required"}
+                          </span>
+                        </div>
+                        {q.type === "multi" && q.options && (
+                          <div className="text-[10px] text-gray-500">
+                            Options: {q.options.join(", ")}
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 text-[11px] text-gray-400">
+              After creation, you can still fine-tune this template in your normal
+              template editor (add logos, images, detailed instructions, etc.).
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
