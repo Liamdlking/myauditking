@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { supabase } from './utils/supabaseClient'
 import type { CurrentUser } from './types'
-
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import TemplatesPage from './pages/TemplatesPage'
@@ -10,17 +9,12 @@ import InspectionsPage from './pages/InspectionsPage'
 import ActionsPage from './pages/ActionsPage'
 import SitesPage from './pages/SitesPage'
 import UsersPage from './pages/UsersPage'
-
+import TemplateEditorPage from './pages/TemplateEditorPage'
 import Navbar from './components/Navbar'
 
-/* -------------------------------------------
-   Load & Track Session
--------------------------------------------- */
 function useSession() {
   const [session, setSession] = useState<any | null>(null)
-
   useEffect(() => {
-    // Load stored session
     const raw = localStorage.getItem('ak_session')
     if (raw) {
       try {
@@ -29,8 +23,6 @@ function useSession() {
         setSession(null)
       }
     }
-
-    // Listen for login/logout events
     const { data: listener } = supabase.auth.onAuthStateChange((_event, s) => {
       if (s) {
         setSession(s)
@@ -40,40 +32,30 @@ function useSession() {
         localStorage.removeItem('ak_session')
       }
     })
-
-    return () => listener?.subscription.unsubscribe()
+    return () => {
+      listener?.subscription.unsubscribe()
+    }
   }, [])
-
   return { session, setSession }
 }
 
-/* -------------------------------------------
-   Main Application Shell
--------------------------------------------- */
 function AppShell() {
-  const { session } = useSession()
+  const { session, setSession } = useSession()
   const location = useLocation()
-
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null)
 
-  /* -------------------------------------------
-     Load user profile
-  -------------------------------------------- */
   useEffect(() => {
     async function loadProfile() {
       if (!session) {
         setCurrentUser(null)
         return
       }
-
       const { data, error } = await supabase
         .from('profiles')
         .select('id,email,name,role,site_access,is_banned')
         .eq('id', session.user.id)
         .single()
-
       if (error || !data) {
-        // fallback
         setCurrentUser({
           id: session.user.id,
           email: session.user.email || '',
@@ -87,29 +69,22 @@ function AppShell() {
           id: data.id,
           email: data.email || '',
           name: data.name,
-          role: data.role || 'inspector',
+          role: (data.role as any) || 'inspector',
           site_access: data.site_access || [],
           is_banned: data.is_banned
         })
       }
     }
-
     loadProfile()
   }, [session])
 
-  /* -------------------------------------------
-     If NOT logged in → always show login
-  -------------------------------------------- */
   if (!session) {
     if (location.pathname !== '/login') {
       return <Navigate to="/login" replace />
     }
-    return <LoginPage /> // ❗ No props, fixed
+    return <LoginPage onLogin={setSession} />
   }
 
-  /* -------------------------------------------
-     If banned → block access
-  -------------------------------------------- */
   if (currentUser?.is_banned) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -133,26 +108,22 @@ function AppShell() {
     )
   }
 
-  /* -------------------------------------------
-     Render App Shell + Routes
-  -------------------------------------------- */
   return (
     <div className="min-h-screen flex flex-col">
       <Navbar />
-
       <main className="flex-1 px-4 py-4">
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/templates" element={<TemplatesPage />} />
+          {/* NEW: full template editor routes */}
+          <Route path="/templates/new" element={<TemplateEditorPage mode="create" />} />
+          <Route path="/templates/:id/edit" element={<TemplateEditorPage mode="edit" />} />
+
           <Route path="/inspections" element={<InspectionsPage />} />
           <Route path="/actions" element={<ActionsPage />} />
           <Route path="/sites" element={<SitesPage />} />
           <Route path="/users" element={<UsersPage />} />
-
-          {/* Always render LoginPage with no props */}
-          <Route path="/login" element={<LoginPage />} />
-
-          {/* anything else → redirect */}
+          <Route path="/login" element={<LoginPage onLogin={setSession} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
