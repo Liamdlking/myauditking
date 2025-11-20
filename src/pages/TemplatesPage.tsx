@@ -38,10 +38,11 @@ export default function TemplatesPage() {
   const [showImportModal, setShowImportModal] = useState(false);
 
   // ------------------------------------------------
-  // Load current user profile (for role & site access)
+  // Load current user profile (NOTE: uses user_id, not id)
   // ------------------------------------------------
   useEffect(() => {
     let isMounted = true;
+
     async function loadUser() {
       setLoadingUser(true);
       try {
@@ -55,13 +56,16 @@ export default function TemplatesPage() {
           return;
         }
 
+        // Your table columns (from screenshot):
+        // user_id (uuid), name (text), role (text)
         const { data, error } = await supabase
           .from("profiles")
-          .select("id,email,name,role,site_access,is_banned")
-          .eq("id", session.user.id)
+          .select("user_id,name,role")
+          .eq("user_id", session.user.id)
           .single();
 
         if (error || !data) {
+          console.warn("profiles lookup failed, defaulting to inspector", error);
           if (isMounted) {
             setCurrentUser({
               id: session.user.id,
@@ -75,12 +79,12 @@ export default function TemplatesPage() {
         } else {
           if (isMounted) {
             setCurrentUser({
-              id: data.id,
-              email: data.email || "",
-              name: data.name || data.email || "",
+              id: data.user_id, // <-- key fix
+              email: session.user.email || "",
+              name: data.name || session.user.email || "",
               role: (data.role as any) || "inspector",
-              site_access: data.site_access || [],
-              is_banned: data.is_banned,
+              site_access: [], // you can wire this later if you add the column
+              is_banned: false,
             });
           }
         }
@@ -100,7 +104,8 @@ export default function TemplatesPage() {
     };
   }, []);
 
-  const canCreate = currentUser && (currentUser.role === "manager" || currentUser.role === "admin");
+  const canCreate =
+    currentUser && (currentUser.role === "manager" || currentUser.role === "admin");
   const canDelete = currentUser && currentUser.role === "admin";
 
   // ------------------------------------------------
@@ -174,8 +179,7 @@ export default function TemplatesPage() {
         t.name.toLowerCase().includes(search.toLowerCase()) ||
         (t.description || "").toLowerCase().includes(search.toLowerCase());
 
-      const matchesSite =
-        !siteFilter || (t.site_id && t.site_id === siteFilter);
+      const matchesSite = !siteFilter || (t.site_id && t.site_id === siteFilter);
 
       return matchesSearch && matchesSite;
     });
@@ -195,15 +199,12 @@ export default function TemplatesPage() {
 
   const openNewTemplate = () => {
     if (!canCreate) return;
-    // Adjust this to your actual route for creating a new template
-    // e.g. navigate("/templates/new");
-    navigate("/templates/new");
+    navigate("/templates/new"); // adjust if your route is different
   };
 
   const openEditTemplate = (id: string) => {
     if (!canCreate) return;
-    // Adjust to your edit route (for example: /templates/:id/edit)
-    navigate(`/templates/${id}`);
+    navigate(`/templates/${id}`); // adjust to your existing edit route
   };
 
   const handleDeleteTemplate = async (tpl: TemplateRow) => {
@@ -214,10 +215,7 @@ export default function TemplatesPage() {
     if (!ok) return;
 
     try {
-      const { error } = await supabase
-        .from("templates")
-        .delete()
-        .eq("id", tpl.id);
+      const { error } = await supabase.from("templates").delete().eq("id", tpl.id);
 
       if (error) {
         console.error(error);
@@ -239,14 +237,6 @@ export default function TemplatesPage() {
     return (
       <div className="p-6 text-sm text-gray-600">
         Loading account…
-      </div>
-    );
-  }
-
-  if (currentUser?.is_banned) {
-    return (
-      <div className="p-6 text-sm text-rose-600">
-        Your account is banned. Please contact an administrator.
       </div>
     );
   }
