@@ -1,12 +1,16 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { useLocation } from "react-router-dom";
 import jsPDF from "jspdf";
 import { supabase } from "@/utils/supabaseClient";
 
 type Role = "admin" | "manager" | "inspector" | string | null;
-type Status = "in_progress" | "completed";
+// IMPORTANT: match DB constraint: 'in_progress' | 'submitted'
+type Status = "in_progress" | "submitted";
 
-type QuestionType = "yes_no_na" | "good_fair_poor" | "multiple_choice" | "text";
+type QuestionType =
+  | "yes_no_na"
+  | "good_fair_poor"
+  | "multiple_choice"
+  | "text";
 
 type TemplateQuestion = {
   id: string;
@@ -41,9 +45,6 @@ type InspectionItem = {
   notes: string | null;
   photos: string[];
   required: boolean;
-  // NEW: attribution
-  answered_by_user_id?: string | null;
-  answered_by_name?: string | null;
 };
 
 type InspectionRow = {
@@ -78,9 +79,6 @@ type ModalAnswer = {
   notes: string | null;
   photos: string[];
   required: boolean;
-  // NEW: attribution
-  answered_by_user_id: string | null;
-  answered_by_name: string | null;
 };
 
 function formatDateTime(iso: string | null) {
@@ -91,13 +89,9 @@ function formatDateTime(iso: string | null) {
 }
 
 export default function InspectionsPage() {
-  const location = useLocation();
-
   const [role, setRole] = useState<Role>(null);
   const [roleLoading, setRoleLoading] = useState(true);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-  const [currentUserName, setCurrentUserName] = useState<string | null>(null);
-  const [siteAccess, setSiteAccess] = useState<string[] | null>(null); // null = no restriction
 
   const [sites, setSites] = useState<SiteRow[]>([]);
   const [inspections, setInspections] = useState<InspectionRow[]>([]);
@@ -121,10 +115,8 @@ export default function InspectionsPage() {
   const [modalLoading, setModalLoading] = useState(false);
   const [modalSaving, setModalSaving] = useState(false);
 
-  const [autoStartDone, setAutoStartDone] = useState(false);
-
   // --------------------------
-  // Load user + role + site access
+  // Load user + role
   // --------------------------
   useEffect(() => {
     const loadUserRole = async () => {
@@ -134,33 +126,24 @@ export default function InspectionsPage() {
         const user = userData?.user;
         if (!user) {
           setCurrentUserId(null);
-          setCurrentUserName(null);
           setRole(null);
-          setSiteAccess(null);
           return;
         }
         setCurrentUserId(user.id);
 
         const { data, error } = await supabase
           .from("profiles")
-          .select("role,name,site_access")
+          .select("role")
           .eq("user_id", user.id)
           .single();
 
         if (!error && data) {
           setRole((data.role as Role) || "inspector");
-          setCurrentUserName(data.name || user.email || "");
-          // if site_access is null, treat as "all sites" (no restriction)
-          setSiteAccess(Array.isArray(data.site_access) ? data.site_access : null);
         } else {
           setRole("inspector");
-          setCurrentUserName(user.email || "");
-          setSiteAccess(null);
         }
       } catch {
         setRole("inspector");
-        setCurrentUserName(null);
-        setSiteAccess(null);
       } finally {
         setRoleLoading(false);
       }
@@ -243,120 +226,13 @@ export default function InspectionsPage() {
   }, []);
 
   // --------------------------
-  // Auto-start new inspection from templateId in URL
-  // --------------------------
-  useEffect(() => {
-    const doAutoStart = async () => {
-      if (autoStartDone) return;
-
-      const params = new URLSearchParams(location.search);
-      const tplId = params.get("templateId");
-      if (!tplId) return;
-      if (!currentUserId || roleLoading) return;
-
-      try {
-        // Fetch template basics
-        const { data: tpl, error: tplErr } = await supabase
-          .from("templates")
-          .select("id,name,site_id")
-          .eq("id", tplId)
-          .single();
-
-        if (tplErr || !tpl) {
-          console.error("autoStart template error", tplErr);
-          alert("Could not start inspection: template not found.");
-          return;
-        }
-
-        const siteName =
-          tpl.site_id && sites.length
-            ? sites.find((s) => s.id === tpl.site_id)?.name || null
-            : null;
-
-        const nowIso = new Date().toISOString();
-
-        // Create new inspection row
-        const { data: newInsp, error: inspErr } = await supabase
-          .from("inspections")
-          .insert({
-            template_id: tpl.id,
-            template_name: tpl.name,
-            site_id: tpl.site_id || null,
-            site: siteName,
-            status: "in_progress" as Status,
-            started_at: nowIso,
-            submitted_at: null,
-            score: null,
-            items: null,
-            owner_user_id: currentUserId,
-            owner_name: currentUserName,
-          })
-          .select(
-            "id, template_id, template_name, site_id, site, status, started_at, submitted_at, score, items, owner_user_id, owner_name"
-          )
-          .single();
-
-        if (inspErr || !newInsp) {
-          console.error("autoStart insp insert error", inspErr);
-          alert(
-            inspErr?.message || "Could not start inspection (inspections)."
-          );
-          return;
-        }
-
-        // Refresh list
-        await loadInspections();
-
-        const inspRow: InspectionRow = {
-          id: newInsp.id,
-          template_id: newInsp.template_id,
-          template_name: newInsp.template_name,
-          site_id: newInsp.site_id || null,
-          site: newInsp.site || null,
-          status: (newInsp.status as Status) || "in_progress",
-          started_at: newInsp.started_at,
-          submitted_at: newInsp.submitted_at || null,
-          score:
-            newInsp.score === null ? null : Number(newInsp.score),
-          items: (newInsp.items as InspectionItem[]) || null,
-          owner_user_id: newInsp.owner_user_id || null,
-          owner_name: newInsp.owner_name || null,
-        };
-
-        await openInspectionModal(inspRow);
-      } finally {
-        setAutoStartDone(true);
-      }
-    };
-
-    doAutoStart();
-  }, [
-    location.search,
-    autoStartDone,
-    currentUserId,
-    currentUserName,
-    roleLoading,
-    sites,
-  ]);
-
-  // --------------------------
   // Filters
   // --------------------------
   const filteredInspections = useMemo(() => {
     return inspections.filter((insp) => {
-      // Restrict by site ACL for non-admin/manager
-      if (!canSeeAll) {
-        if (
-          siteAccess &&
-          siteAccess.length > 0 &&
-          insp.site_id &&
-          !siteAccess.includes(insp.site_id)
-        ) {
-          return false;
-        }
-        // if siteAccess is null or empty, treat as "all sites allowed"
+      if (!canSeeAll && currentUserId && insp.owner_user_id !== currentUserId) {
+        return false;
       }
-
       if (selectedSiteId !== "all" && insp.site_id !== selectedSiteId) {
         return false;
       }
@@ -365,13 +241,13 @@ export default function InspectionsPage() {
       }
       return true;
     });
-  }, [inspections, canSeeAll, siteAccess, selectedSiteId, statusFilter]);
+  }, [inspections, canSeeAll, currentUserId, selectedSiteId, statusFilter]);
 
   const inProgress = filteredInspections.filter(
     (i) => i.status === "in_progress"
   );
-  const completed = filteredInspections.filter(
-    (i) => i.status === "completed"
+  const submitted = filteredInspections.filter(
+    (i) => i.status === "submitted"
   );
 
   const siteNameFor = (site_id: string | null) => {
@@ -398,13 +274,9 @@ export default function InspectionsPage() {
 
   const toggleSelectAllVisible = () => {
     if (allSelected) {
-      setSelectedIds((prev) =>
-        prev.filter((id) => !allVisibleIds.includes(id))
-      );
+      setSelectedIds((prev) => prev.filter((id) => !allVisibleIds.includes(id)));
     } else {
-      setSelectedIds((prev) =>
-        Array.from(new Set([...prev, ...allVisibleIds]))
-      );
+      setSelectedIds((prev) => Array.from(new Set([...prev, ...allVisibleIds])));
     }
   };
 
@@ -459,8 +331,6 @@ export default function InspectionsPage() {
             notes: existing ? existing.notes : null,
             photos: existing ? existing.photos || [] : [],
             required: q.required,
-            answered_by_user_id: existing?.answered_by_user_id ?? null,
-            answered_by_name: existing?.answered_by_name ?? null,
           });
         }
       }
@@ -490,30 +360,11 @@ export default function InspectionsPage() {
   };
 
   // --------------------------
-  // Update answers state (with attribution)
+  // Update answers state
   // --------------------------
   const updateAnswer = (index: number, patch: Partial<ModalAnswer>) => {
     setAnswers((prev) =>
-      prev.map((a, i) => {
-        if (i !== index) return a;
-        const next = { ...a, ...patch };
-
-        const changed =
-          (patch.value !== undefined && patch.value !== a.value) ||
-          (patch.choice_key !== undefined &&
-            patch.choice_key !== a.choice_key) ||
-          (patch.choice_label !== undefined &&
-            patch.choice_label !== a.choice_label) ||
-          (patch.notes !== undefined && patch.notes !== a.notes) ||
-          (patch.photos !== undefined && patch.photos !== a.photos);
-
-        if (changed) {
-          next.answered_by_user_id = currentUserId;
-          next.answered_by_name = currentUserName || null;
-        }
-
-        return next;
-      })
+      prev.map((a, i) => (i === index ? { ...a, ...patch } : a))
     );
   };
 
@@ -523,28 +374,20 @@ export default function InspectionsPage() {
     reader.onload = () => {
       const url = String(reader.result);
       setAnswers((prev) =>
-        prev.map((a, i) => {
-          if (i !== index) return a;
-          const photos = [...a.photos, url];
-          return {
-            ...a,
-            photos,
-            answered_by_user_id: currentUserId,
-            answered_by_name: currentUserName || null,
-          };
-        })
+        prev.map((a, i) =>
+          i === index ? { ...a, photos: [...a.photos, url] } : a
+        )
       );
     };
     reader.readAsDataURL(file);
   };
 
   // --------------------------
-  // Save (in_progress) or complete
+  // Save (in_progress) or submitted (Completed)
   // --------------------------
   const computeScore = (items: InspectionItem[]): number | null => {
     const scored = items.filter(
-      (it) =>
-        it.type === "yes_no_na" || it.type === "good_fair_poor"
+      (it) => it.type === "yes_no_na" || it.type === "good_fair_poor"
     );
     if (!scored.length) return null;
 
@@ -555,7 +398,6 @@ export default function InspectionsPage() {
       if (it.type === "yes_no_na") {
         max += 1;
         if (it.choice_key === "yes") total += 1;
-        if (it.choice_key === "no") total += 0;
         if (it.choice_key === "na") {
           max -= 1; // exclude N/A from denominator
         }
@@ -563,7 +405,6 @@ export default function InspectionsPage() {
         max += 2;
         if (it.choice_key === "good") total += 2;
         if (it.choice_key === "fair") total += 1;
-        if (it.choice_key === "poor") total += 0;
       }
     }
 
@@ -584,8 +425,6 @@ export default function InspectionsPage() {
       notes: a.notes,
       photos: a.photos,
       required: a.required,
-      answered_by_user_id: a.answered_by_user_id,
-      answered_by_name: a.answered_by_name,
     }));
   };
 
@@ -615,7 +454,7 @@ export default function InspectionsPage() {
       const score = computeScore(items);
       const nowIso = new Date().toISOString();
       const newStatus: Status = markComplete
-        ? "completed"
+        ? "submitted" // store as 'submitted' in DB
         : "in_progress";
 
       const { error } = await supabase
@@ -674,11 +513,7 @@ export default function InspectionsPage() {
     doc.setFontSize(10);
     doc.text(`Site: ${activeInspection.site || "—"}`, 15, y);
     y += 5;
-    doc.text(
-      `Started: ${formatDateTime(activeInspection.started_at)}`,
-      15,
-      y
-    );
+    doc.text(`Started: ${formatDateTime(activeInspection.started_at)}`, 15, y);
     y += 5;
     if (activeInspection.submitted_at) {
       doc.text(
@@ -756,8 +591,6 @@ export default function InspectionsPage() {
         let ansLabel = "";
         if (q.type === "text") {
           ansLabel = a.value || "";
-        } else if (q.type === "multiple_choice") {
-          ansLabel = a.choice_label || "";
         } else {
           ansLabel = a.choice_label || "";
         }
@@ -772,14 +605,6 @@ export default function InspectionsPage() {
         if (a.photos && a.photos.length > 0) {
           y = addTextWrapped(
             `Photos attached: ${a.photos.length}`,
-            20,
-            y
-          );
-        }
-
-        if (a.answered_by_name) {
-          y = addTextWrapped(
-            `Last answered by: ${a.answered_by_name}`,
             20,
             y
           );
@@ -971,8 +796,6 @@ export default function InspectionsPage() {
             let ansLabel = "";
             if (q.type === "text") {
               ansLabel = it.value || "";
-            } else if (q.type === "multiple_choice") {
-              ansLabel = it.choice_label || "";
             } else {
               ansLabel = it.choice_label || "";
             }
@@ -986,13 +809,6 @@ export default function InspectionsPage() {
             if (it.photos && it.photos.length > 0) {
               y = addTextWrapped(
                 `Photos attached: ${it.photos.length}`,
-                20,
-                y
-              );
-            }
-            if (it.answered_by_name) {
-              y = addTextWrapped(
-                `Last answered by: ${it.answered_by_name}`,
                 20,
                 y
               );
@@ -1031,9 +847,9 @@ export default function InspectionsPage() {
             Start, continue and complete inspections. Save in progress and
             export branded PDF reports.
           </p>
-          {!roleLoading && (
+          {!roleLoading && !canSeeAll && (
             <p className="text-[11px] text-gray-400 mt-1">
-              You can see inspections for the sites you have access to.
+              You are an inspector – you’ll only see inspections you own.
             </p>
           )}
         </div>
@@ -1064,7 +880,8 @@ export default function InspectionsPage() {
             >
               <option value="all">All</option>
               <option value="in_progress">In progress</option>
-              <option value="completed">Completed</option>
+              {/* DB value 'submitted', label 'Completed' */}
+              <option value="submitted">Completed</option>
             </select>
           </div>
 
@@ -1139,14 +956,14 @@ export default function InspectionsPage() {
             </div>
           )}
 
-          {/* Completed */}
-          {completed.length > 0 && (
+          {/* Completed (status = submitted) */}
+          {submitted.length > 0 && (
             <div className="space-y-2">
               <h2 className="text-sm font-semibold text-gray-700">
                 Completed
               </h2>
               <div className="space-y-2">
-                {completed.map((insp) => (
+                {submitted.map((insp) => (
                   <InspectionRowCard
                     key={insp.id}
                     insp={insp}
@@ -1247,25 +1064,15 @@ export default function InspectionsPage() {
                                       </span>
                                     )}
                                   </div>
-                                  <div className="text-right space-y-1">
-                                    <div className="text-[10px] text-gray-400">
-                                      {q.type === "yes_no_na" &&
-                                        "Yes / No / N/A"}
-                                      {q.type === "good_fair_poor" &&
-                                        "Good / Fair / Poor"}
-                                      {q.type === "multiple_choice" &&
-                                        "Multiple choice"}
-                                      {q.type === "text" &&
-                                        "Text response"}
-                                    </div>
-                                    {a.answered_by_name && (
-                                      <div className="text-[10px] text-gray-400">
-                                        Last answered by:{" "}
-                                        <span className="font-medium">
-                                          {a.answered_by_name}
-                                        </span>
-                                      </div>
-                                    )}
+                                  <div className="text-[10px] text-gray-400">
+                                    {q.type === "yes_no_na" &&
+                                      "Yes / No / N/A"}
+                                    {q.type === "good_fair_poor" &&
+                                      "Good / Fair / Poor"}
+                                    {q.type === "multiple_choice" &&
+                                      "Multiple choice"}
+                                    {q.type === "text" &&
+                                      "Text response"}
                                   </div>
                                 </div>
 
@@ -1441,11 +1248,11 @@ export default function InspectionsPage() {
                       </div>
                       <div className="text-gray-600">
                         Status:{" "}
-                          <span className="font-medium">
-                            {activeInspection.status === "completed"
-                              ? "Completed"
-                              : "In progress"}
-                          </span>
+                        <span className="font-medium">
+                          {activeInspection.status === "submitted"
+                            ? "Completed"
+                            : "In progress"}
+                        </span>
                       </div>
                       {activeInspection.score !== null && (
                         <div className="text-gray-600">
@@ -1537,9 +1344,9 @@ function InspectionRowCard({
   };
 
   const statusLabel =
-    insp.status === "completed" ? "Completed" : "In progress";
+    insp.status === "submitted" ? "Completed" : "In progress";
   const statusColor =
-    insp.status === "completed"
+    insp.status === "submitted"
       ? "bg-emerald-50 text-emerald-700 border-emerald-100"
       : "bg-amber-50 text-amber-700 border-amber-100";
 
@@ -1567,9 +1374,7 @@ function InspectionRowCard({
             </span>
           </div>
           <div className="text-[11px] text-gray-500 space-x-2">
-            <span>
-              Started: {formatDateTime(insp.started_at)}
-            </span>
+            <span>Started: {formatDateTime(insp.started_at)}</span>
             {insp.submitted_at && (
               <span>• Submitted: {formatDateTime(insp.submitted_at)}</span>
             )}
