@@ -202,6 +202,36 @@ export default function TemplatesPage() {
     }
   };
 
+  // 🔴 NEW: admin-only delete handler
+  const handleDeleteTemplate = async (tpl: TemplateRow) => {
+    if (!isAdmin) {
+      alert("Only admins can delete templates.");
+      return;
+    }
+    if (
+      !window.confirm(
+        `Delete template “${tpl.name}”? This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+
+    try {
+      const { error } = await supabase
+        .from("templates")
+        .delete()
+        .eq("id", tpl.id);
+
+      if (error) throw error;
+
+      await loadTemplates();
+      alert("Template deleted.");
+    } catch (e: any) {
+      console.error("deleteTemplate error", e);
+      alert(e?.message || "Could not delete template.");
+    }
+  };
+
   const handleStartInspection = async (tpl: TemplateRow) => {
     try {
       const { data: userData } = await supabase.auth.getUser();
@@ -407,6 +437,14 @@ export default function TemplatesPage() {
                     >
                       {tpl.is_published ? "Unpublish" : "Publish"}
                     </button>
+                    {isAdmin && (
+                      <button
+                        onClick={() => handleDeleteTemplate(tpl)}
+                        className="px-3 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
+                      >
+                        Delete
+                      </button>
+                    )}
                   </>
                 )}
               </div>
