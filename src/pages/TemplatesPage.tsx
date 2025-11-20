@@ -223,7 +223,7 @@ export default function TemplatesPage() {
 
       const nowIso = new Date().toISOString();
 
-      const { data, error } = await supabase
+      const { error } = await supabase
         .from("inspections")
         .insert({
           template_id: tpl.id,
@@ -237,9 +237,7 @@ export default function TemplatesPage() {
           items: null,
           owner_user_id: user.id,
           owner_name: ownerName,
-        })
-        .select("id")
-        .single();
+        });
 
       if (error) throw error;
 
@@ -421,7 +419,7 @@ export default function TemplatesPage() {
       {showImportModal && (
         <ImportTemplateFromPdfModal
           onClose={() => setShowImportModal(false)}
-          onTemplateCreated={() => {
+          onCreated={() => {
             setShowImportModal(false);
             loadTemplates();
           }}
