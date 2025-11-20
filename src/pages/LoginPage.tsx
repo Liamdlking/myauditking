@@ -23,50 +23,68 @@ export default function LoginPage() {
     e.preventDefault();
     setErrorMsg(null);
 
-    if (!pin.trim()) {
+    const trimmedPin = pin.trim();
+    if (!trimmedPin) {
       setErrorMsg("Please enter your PIN.");
       return;
     }
 
     setLoading(true);
     try {
-      // 1. Look up profile by pin_code
+      // 1) Look up profile by pin_code
       const { data: profile, error } = await supabase
         .from("profiles")
         .select("email, pin_code")
-        .eq("pin_code", pin)
+        .eq("pin_code", trimmedPin)
         .maybeSingle();
 
-      if (error || !profile) {
-        setErrorMsg("Invalid PIN.");
+      console.log("PIN login profile result:", { profile, error });
+
+      if (error) {
+        // Real Supabase error (RLS / column name / type / etc)
+        setErrorMsg(
+          `Supabase error while checking PIN: ${error.message || "Unknown error"}`
+        );
         setLoading(false);
         return;
       }
 
-      const email = profile.email as string | undefined;
+      if (!profile) {
+        // Query ran OK but no row matched that PIN
+        setErrorMsg("No profile found for that PIN. Check the profiles.pin_code value.");
+        setLoading(false);
+        return;
+      }
+
+      const email = (profile as any).email as string | undefined;
       if (!email) {
-        setErrorMsg("No email stored for this PIN. Check profiles table.");
+        setErrorMsg(
+          "Profile was found for that PIN, but email is empty. Check the 'email' column in profiles."
+        );
         setLoading(false);
         return;
       }
 
-      // 2. Login using email + PIN (password = PIN)
+      // 2) Login using email + PIN (password = PIN)
       const { error: signInError } = await supabase.auth.signInWithPassword({
         email,
-        password: pin,
+        password: trimmedPin,
       });
 
       if (signInError) {
-        console.error(signInError);
-        setErrorMsg("Could not sign in with this PIN. Check Supabase user password.");
+        console.error("signInWithPassword error:", signInError);
+        setErrorMsg(
+          "PIN matched a profile, but Supabase could not sign in with this PIN. " +
+            "Make sure the user's auth password is set to the same PIN."
+        );
         setLoading(false);
         return;
       }
 
       // Success → dashboard
       navigate("/");
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      console.error("Unexpected PIN login error:", err);
       setErrorMsg("Unexpected error logging in with PIN.");
     } finally {
       setLoading(false);
@@ -106,7 +124,7 @@ export default function LoginPage() {
           </div>
 
           {errorMsg && (
-            <div className="text-xs text-rose-600 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">
+            <div className="text-xs text-rose-600 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 whitespace-pre-wrap">
               {errorMsg}
             </div>
           )}
