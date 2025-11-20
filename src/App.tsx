@@ -40,7 +40,7 @@ function useSession() {
 }
 
 function AppShell() {
-  const { session, setSession } = useSession()
+  const { session } = useSession()
   const location = useLocation()
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null)
 
@@ -82,7 +82,8 @@ function AppShell() {
     if (location.pathname !== '/login') {
       return <Navigate to="/login" replace />
     }
-    return <LoginPage onLogin={setSession} />
+    // ⬇️ No props – LoginPage reads supabase auth itself
+    return <LoginPage />
   }
 
   if (currentUser?.is_banned) {
@@ -115,15 +116,14 @@ function AppShell() {
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/templates" element={<TemplatesPage />} />
-          {/* NEW: full template editor routes */}
           <Route path="/templates/new" element={<TemplateEditorPage mode="create" />} />
           <Route path="/templates/:id/edit" element={<TemplateEditorPage mode="edit" />} />
-
           <Route path="/inspections" element={<InspectionsPage />} />
           <Route path="/actions" element={<ActionsPage />} />
           <Route path="/sites" element={<SitesPage />} />
           <Route path="/users" element={<UsersPage />} />
-          <Route path="/login" element={<LoginPage onLogin={setSession} />} />
+          {/* Login route without props */}
+          <Route path="/login" element={<LoginPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
