@@ -45,7 +45,7 @@ type InspectionItem = {
   notes: string | null;
   photos: string[];
   required: boolean;
-  // NEW: who last answered this question
+  // who last answered this question
   answered_by_user_id: string | null;
   answered_by_name: string | null;
 };
@@ -82,7 +82,6 @@ type ModalAnswer = {
   notes: string | null;
   photos: string[];
   required: boolean;
-  // NEW: who last answered this question in the UI
   answered_by_user_id: string | null;
   answered_by_name: string | null;
 };
@@ -167,7 +166,8 @@ export default function InspectionsPage() {
 
   const isAdmin = role === "admin";
   const isManager = role === "manager";
-  const canSeeAll = isAdmin || isManager;
+  // NOTE: we are now allowing *everyone* to see all inspections,
+  // so we do NOT filter by owner_user_id anymore.
 
   // --------------------------
   // Load sites
@@ -243,9 +243,7 @@ export default function InspectionsPage() {
   // --------------------------
   const filteredInspections = useMemo(() => {
     return inspections.filter((insp) => {
-      if (!canSeeAll && currentUserId && insp.owner_user_id !== currentUserId) {
-        return false;
-      }
+      // ✅ Everyone can see all inspections now, no owner filter
       if (selectedSiteId !== "all" && insp.site_id !== selectedSiteId) {
         return false;
       }
@@ -254,7 +252,7 @@ export default function InspectionsPage() {
       }
       return true;
     });
-  }, [inspections, canSeeAll, currentUserId, selectedSiteId, statusFilter]);
+  }, [inspections, selectedSiteId, statusFilter]);
 
   const inProgress = filteredInspections.filter(
     (i) => i.status === "in_progress"
@@ -491,9 +489,7 @@ export default function InspectionsPage() {
 
       const score = computeScore(items);
       const nowIso = new Date().toISOString();
-      const newStatus: Status = markComplete
-        ? "submitted" // store as 'submitted' in DB
-        : "in_progress";
+      const newStatus: Status = markComplete ? "submitted" : "in_progress";
 
       const { error } = await supabase
         .from("inspections")
@@ -902,11 +898,6 @@ export default function InspectionsPage() {
             Start, continue and complete inspections. Save in progress and
             export branded PDF reports.
           </p>
-          {!roleLoading && !canSeeAll && (
-            <p className="text-[11px] text-gray-400 mt-1">
-              You are an inspector – you’ll only see inspections you own.
-            </p>
-          )}
         </div>
 
         <div className="space-y-2 text-xs">
@@ -1036,7 +1027,7 @@ export default function InspectionsPage() {
         </div>
       )}
 
-            {/* Modal */}
+      {/* Modal */}
       {modalOpen && activeInspection && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
           <div className="w-full max-w-5xl max-h-[90vh] overflow-auto rounded-2xl bg-white shadow-xl p-5 space-y-4">
