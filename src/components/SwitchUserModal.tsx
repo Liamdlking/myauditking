@@ -12,52 +12,47 @@ export default function SwitchUserModal({ onClose }: Props) {
   const navigate = useNavigate();
 
   const signInWithPin = async () => {
-    if (!pin) return alert("Enter a PIN.");
+    if (!pin.trim()) {
+      alert("Enter a PIN.");
+      return;
+    }
 
     setLoading(true);
-
     try {
-      // 1. Look up user by PIN
-      const { data: userRow, error } = await supabase
+      // 1. Look up profile by pin_code
+      const { data: profile, error } = await supabase
         .from("profiles")
-        .select("user_id")
+        .select("email, pin_code")
         .eq("pin_code", pin)
-        .single();
+        .maybeSingle();
 
-      if (error || !userRow) {
+      if (error || !profile) {
         alert("Invalid PIN.");
         setLoading(false);
         return;
       }
 
-      const userId = userRow.user_id;
-
-      // 2. Fetch email from auth.users
-      const { data: authUser, error: authError } = await supabase.auth.admin.getUserById(
-        userId
-      );
-
-      if (authError || !authUser?.user?.email) {
-        alert("User account not found.");
+      const email = profile.email as string | undefined;
+      if (!email) {
+        alert("No email stored for this PIN in profiles.");
         setLoading(false);
         return;
       }
 
-      const email = authUser.user.email;
-
-      // 3. Log out current user
+      // 2. Sign out current user
       await supabase.auth.signOut();
 
-      // 4. Log in using "magic" tokenless trick
-      //    Using OTP-less login via Supabase: generate a one-time token
-      const { data: sessionData, error: sessionError } =
-        await supabase.auth.signInWithPassword({
-          email,
-          password: pin, // using PIN as password surrogate
-        });
+      // 3. Sign in with email + PIN (password = PIN)
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email,
+        password: pin,
+      });
 
-      if (sessionError) {
-        alert("Could not sign in with PIN.");
+      if (signInError) {
+        console.error(signInError);
+        alert(
+          "Could not sign in with this PIN. Make sure the Supabase password matches the PIN."
+        );
         setLoading(false);
         return;
       }
@@ -66,10 +61,10 @@ export default function SwitchUserModal({ onClose }: Props) {
       navigate("/");
     } catch (err) {
       console.error(err);
-      alert("Could not switch user.");
+      alert("Could not switch user via PIN.");
+    } finally {
+      setLoading(false);
     }
-
-    setLoading(false);
   };
 
   return (
@@ -77,18 +72,22 @@ export default function SwitchUserModal({ onClose }: Props) {
       <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-sm space-y-4">
         <h2 className="text-lg font-bold text-purple-700">Switch User</h2>
 
+        <p className="text-xs text-gray-500">
+          Enter another user&apos;s PIN to switch accounts quickly.
+        </p>
+
         <input
           type="password"
           value={pin}
           onChange={(e) => setPin(e.target.value)}
           placeholder="Enter PIN"
-          className="w-full border rounded-xl px-3 py-2"
+          className="w-full border rounded-xl px-3 py-2 text-sm"
         />
 
         <div className="flex justify-end gap-2">
           <button
             onClick={onClose}
-            className="px-3 py-2 rounded-xl border hover:bg-gray-100"
+            className="px-3 py-2 rounded-xl border text-xs hover:bg-gray-100"
           >
             Cancel
           </button>
@@ -96,7 +95,7 @@ export default function SwitchUserModal({ onClose }: Props) {
           <button
             onClick={signInWithPin}
             disabled={loading}
-            className="px-3 py-2 rounded-xl bg-purple-700 text-white hover:bg-purple-800 disabled:opacity-50"
+            className="px-3 py-2 rounded-xl bg-purple-700 text-white text-xs hover:bg-purple-800 disabled:opacity-50"
           >
             {loading ? "Switching…" : "Switch User"}
           </button>
