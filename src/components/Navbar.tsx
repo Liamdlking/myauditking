@@ -1,58 +1,56 @@
-import React from 'react'
-import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { supabase } from '../utils/supabaseClient'
+import React, { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { supabase } from "@/utils/supabaseClient";
+import SwitchUserModal from "./SwitchUserModal";
 
 export default function Navbar() {
-  const location = useLocation()
-  const navigate = useNavigate()
+  const [switchOpen, setSwitchOpen] = useState(false);
+  const navigate = useNavigate();
 
   const logout = async () => {
-    await supabase.auth.signOut()
-    localStorage.removeItem('ak_session')
-    navigate('/login')
-  }
-
-  const links = [
-    { to: '/', label: 'Dashboard' },
-    { to: '/templates', label: 'Templates' },
-    { to: '/inspections', label: 'Inspections' },
-    { to: '/actions', label: 'Actions' },
-    { to: '/sites', label: 'Sites' },
-    { to: '/users', label: 'Users' }
-  ]
+    await supabase.auth.signOut();
+    navigate("/login");
+  };
 
   return (
-    <header className="bg-white border-b shadow-sm">
-      <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div className="h-8 w-8 rounded-full bg-gradient-to-br from-royal-700 to-gold-500" />
-          <span className="font-extrabold text-lg text-royal-700">
-            Audit <span className="text-gold-500">King</span>
-          </span>
-        </div>
-        <nav className="flex items-center gap-4 text-sm">
-          {links.map(link => (
-            <Link
-              key={link.to}
-              to={link.to}
-              className={
-                'px-2 py-1 rounded-md ' +
-                (location.pathname === link.to
-                  ? 'bg-royal-700 text-white'
-                  : 'text-gray-700 hover:bg-gray-100')
-              }
-            >
-              {link.label}
-            </Link>
-          ))}
+    <>
+      <nav className="bg-purple-700 text-white px-4 py-3 flex justify-between items-center shadow">
+        <Link to="/" className="font-bold text-lg tracking-wide">
+          Audit King
+        </Link>
+
+        <div className="flex items-center gap-4 text-sm">
+          <Link to="/templates" className="hover:underline">
+            Templates
+          </Link>
+          <Link to="/inspections" className="hover:underline">
+            Inspections
+          </Link>
+          <Link to="/sites" className="hover:underline">
+            Sites
+          </Link>
+          <Link to="/users" className="hover:underline">
+            Users
+          </Link>
+
+          {/* --- Switch User Button --- */}
+          <button
+            onClick={() => setSwitchOpen(true)}
+            className="bg-white text-purple-700 px-3 py-1 rounded-xl hover:bg-gray-100"
+          >
+            Switch User
+          </button>
+
           <button
             onClick={logout}
-            className="ml-2 px-3 py-1 rounded-md border border-gray-300 text-sm hover:bg-gray-100"
+            className="border px-3 py-1 rounded-xl hover:bg-purple-800"
           >
             Logout
           </button>
-        </nav>
-      </div>
-    </header>
-  )
+        </div>
+      </nav>
+
+      {switchOpen && <SwitchUserModal onClose={() => setSwitchOpen(false)} />}
+    </>
+  );
 }
