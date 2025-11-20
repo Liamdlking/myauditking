@@ -3,7 +3,7 @@ import { supabase } from "@/utils/supabaseClient";
 import AdminGuard from "@/components/AdminGuard";
 
 type ProfileRow = {
-  id: string;
+  user_id: string;
   email: string;
   name: string | null;
   role: string;
@@ -56,7 +56,7 @@ export default function UsersPage() {
     try {
       const { data, error } = await supabase
         .from("profiles")
-        .select("id,email,name,role,pin_code,site_access,is_banned")
+        .select("user_id,email,name,role,pin_code,site_access,is_banned")
         .order("email", { ascending: true });
 
       if (error) {
@@ -293,7 +293,7 @@ export default function UsersPage() {
         role: u.role || "inspector",
         pin_code: u.pin_code,
         site_access: u.site_access,
-        // user_id stays null – can be filled later with SQL if you still use that flow
+        // user_id can be filled later with SQL if you're using that flow
       }));
 
       const { error } = await supabase
@@ -313,7 +313,7 @@ export default function UsersPage() {
       setCsvPreview(null);
       await loadProfiles();
       alert(
-        "Profiles imported / updated. You can either keep using the SQL method to bind auth users, or move to the single-user form which creates auth + profile in one step."
+        "Profiles imported / updated. You can still use the SQL method to bind auth users, or switch fully to the single-user form."
       );
     } catch (err: any) {
       console.error(err);
@@ -376,12 +376,12 @@ export default function UsersPage() {
   // Inline actions: role change, ban/unban, impersonate
   // ---------------------------------------------
   const updateRole = async (p: ProfileRow, newRole: string) => {
-    setBusyUserId(p.id);
+    setBusyUserId(p.user_id);
     try {
       const { error } = await supabase
         .from("profiles")
         .update({ role: newRole })
-        .eq("id", p.id);
+        .eq("user_id", p.user_id);
 
       if (error) {
         console.error(error);
@@ -391,7 +391,7 @@ export default function UsersPage() {
 
       setProfiles((prev) =>
         prev.map((row) =>
-          row.id === p.id ? { ...row, role: newRole } : row
+          row.user_id === p.user_id ? { ...row, role: newRole } : row
         )
       );
     } catch (err: any) {
@@ -407,12 +407,12 @@ export default function UsersPage() {
     const label = next ? "ban" : "unban";
     if (!window.confirm(`Are you sure you want to ${label} ${p.email}?`)) return;
 
-    setBusyUserId(p.id);
+    setBusyUserId(p.user_id);
     try {
       const { error } = await supabase
         .from("profiles")
         .update({ is_banned: next })
-        .eq("id", p.id);
+        .eq("user_id", p.user_id);
 
       if (error) {
         console.error(error);
@@ -422,7 +422,7 @@ export default function UsersPage() {
 
       setProfiles((prev) =>
         prev.map((row) =>
-          row.id === p.id ? { ...row, is_banned: next } : row
+          row.user_id === p.user_id ? { ...row, is_banned: next } : row
         )
       );
     } catch (err: any) {
@@ -444,7 +444,7 @@ export default function UsersPage() {
     );
     if (!ok) return;
 
-    setBusyUserId(p.id);
+    setBusyUserId(p.user_id);
     try {
       await supabase.auth.signOut();
 
@@ -766,7 +766,7 @@ worker3@company.com,Worker Three,admin,3333,site-b`}
                 </thead>
                 <tbody>
                   {filteredProfiles.map((p) => (
-                    <tr key={p.id} className="border-b last:border-0">
+                    <tr key={p.user_id} className="border-b last:border-0">
                       <td className="py-1 pr-2">{p.email}</td>
                       <td className="py-1 pr-2">{p.name || "—"}</td>
                       <td className="py-1 pr-2">
@@ -774,7 +774,7 @@ worker3@company.com,Worker Three,admin,3333,site-b`}
                           value={p.role || "inspector"}
                           onChange={(e) => updateRole(p, e.target.value)}
                           className="border rounded-xl px-2 py-1 text-[11px]"
-                          disabled={busyUserId === p.id}
+                          disabled={busyUserId === p.user_id}
                         >
                           <option value="inspector">Inspector</option>
                           <option value="manager">Manager</option>
@@ -798,14 +798,14 @@ worker3@company.com,Worker Three,admin,3333,site-b`}
                         <div className="flex flex-wrap gap-1">
                           <button
                             onClick={() => toggleBan(p)}
-                            disabled={busyUserId === p.id}
+                            disabled={busyUserId === p.user_id}
                             className="px-2 py-1 rounded-xl border text-[10px] hover:bg-gray-50"
                           >
                             {p.is_banned ? "Unban" : "Ban"}
                           </button>
                           <button
                             onClick={() => impersonateUser(p)}
-                            disabled={busyUserId === p.id}
+                            disabled={busyUserId === p.user_id}
                             className="px-2 py-1 rounded-xl border text-[10px] hover:bg-purple-50 text-purple-700"
                           >
                             Impersonate
