@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { useLocation } from "react-router-dom";
 import jsPDF from "jspdf";
 import { supabase } from "@/utils/supabaseClient";
 
@@ -76,10 +77,6 @@ type ModalAnswer = {
   required: boolean;
 };
 
-function randomId(prefix: string) {
-  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
-}
-
 function formatDateTime(iso: string | null) {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -88,9 +85,12 @@ function formatDateTime(iso: string | null) {
 }
 
 export default function InspectionsPage() {
+  const location = useLocation();
+
   const [role, setRole] = useState<Role>(null);
   const [roleLoading, setRoleLoading] = useState(true);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [currentUserName, setCurrentUserName] = useState<string | null>(null);
 
   const [sites, setSites] = useState<SiteRow[]>([]);
   const [inspections, setInspections] = useState<InspectionRow[]>([]);
@@ -114,6 +114,8 @@ export default function InspectionsPage() {
   const [modalLoading, setModalLoading] = useState(false);
   const [modalSaving, setModalSaving] = useState(false);
 
+  const [autoStartDone, setAutoStartDone] = useState(false);
+
   // --------------------------
   // Load user + role
   // --------------------------
@@ -125,6 +127,7 @@ export default function InspectionsPage() {
         const user = userData?.user;
         if (!user) {
           setCurrentUserId(null);
+          setCurrentUserName(null);
           setRole(null);
           return;
         }
@@ -132,17 +135,20 @@ export default function InspectionsPage() {
 
         const { data, error } = await supabase
           .from("profiles")
-          .select("role")
+          .select("role,name")
           .eq("user_id", user.id)
           .single();
 
         if (!error && data) {
           setRole((data.role as Role) || "inspector");
+          setCurrentUserName(data.name || user.email || "");
         } else {
           setRole("inspector");
+          setCurrentUserName(user.email || "");
         }
       } catch {
         setRole("inspector");
+        setCurrentUserName(null);
       } finally {
         setRoleLoading(false);
       }
@@ -225,6 +231,103 @@ export default function InspectionsPage() {
   }, []);
 
   // --------------------------
+  // Auto-start new inspection from templateId in URL
+  // --------------------------
+  useEffect(() => {
+    const doAutoStart = async () => {
+      if (autoStartDone) return;
+
+      const params = new URLSearchParams(location.search);
+      const tplId = params.get("templateId");
+      if (!tplId) return;
+      if (!currentUserId || roleLoading) return;
+
+      try {
+        // Fetch template basics
+        const { data: tpl, error: tplErr } = await supabase
+          .from("templates")
+          .select("id,name,site_id")
+          .eq("id", tplId)
+          .single();
+
+        if (tplErr || !tpl) {
+          console.error("autoStart template error", tplErr);
+          alert("Could not start inspection: template not found.");
+          return;
+        }
+
+        const siteName =
+          tpl.site_id && sites.length
+            ? sites.find((s) => s.id === tpl.site_id)?.name || null
+            : null;
+
+        const nowIso = new Date().toISOString();
+
+        // Create new inspection row
+        const { data: newInsp, error: inspErr } = await supabase
+          .from("inspections")
+          .insert({
+            template_id: tpl.id,
+            template_name: tpl.name,
+            site_id: tpl.site_id || null,
+            site: siteName,
+            status: "in_progress" as Status,
+            started_at: nowIso,
+            submitted_at: null,
+            score: null,
+            items: null,
+            owner_user_id: currentUserId,
+            owner_name: currentUserName,
+          })
+          .select(
+            "id, template_id, template_name, site_id, site, status, started_at, submitted_at, score, items, owner_user_id, owner_name"
+          )
+          .single();
+
+        if (inspErr || !newInsp) {
+          console.error("autoStart insp insert error", inspErr);
+          alert(
+            inspErr?.message || "Could not start inspection (inspections)."
+          );
+          return;
+        }
+
+        // Refresh list
+        await loadInspections();
+
+        const inspRow: InspectionRow = {
+          id: newInsp.id,
+          template_id: newInsp.template_id,
+          template_name: newInsp.template_name,
+          site_id: newInsp.site_id || null,
+          site: newInsp.site || null,
+          status: (newInsp.status as Status) || "in_progress",
+          started_at: newInsp.started_at,
+          submitted_at: newInsp.submitted_at || null,
+          score:
+            newInsp.score === null ? null : Number(newInsp.score),
+          items: (newInsp.items as InspectionItem[]) || null,
+          owner_user_id: newInsp.owner_user_id || null,
+          owner_name: newInsp.owner_name || null,
+        };
+
+        await openInspectionModal(inspRow);
+      } finally {
+        setAutoStartDone(true);
+      }
+    };
+
+    doAutoStart();
+  }, [
+    location.search,
+    autoStartDone,
+    currentUserId,
+    currentUserName,
+    roleLoading,
+    sites,
+  ]);
+
+  // --------------------------
   // Filters
   // --------------------------
   const filteredInspections = useMemo(() => {
@@ -267,14 +370,19 @@ export default function InspectionsPage() {
   const clearSelection = () => setSelectedIds([]);
 
   const allVisibleIds = filteredInspections.map((i) => i.id);
-  const allSelected = allVisibleIds.length > 0 &&
+  const allSelected =
+    allVisibleIds.length > 0 &&
     allVisibleIds.every((id) => selectedIds.includes(id));
 
   const toggleSelectAllVisible = () => {
     if (allSelected) {
-      setSelectedIds((prev) => prev.filter((id) => !allVisibleIds.includes(id)));
+      setSelectedIds((prev) =>
+        prev.filter((id) => !allVisibleIds.includes(id))
+      );
     } else {
-      setSelectedIds((prev) => Array.from(new Set([...prev, ...allVisibleIds])));
+      setSelectedIds((prev) =>
+        Array.from(new Set([...prev, ...allVisibleIds]))
+      );
     }
   };
 
@@ -360,10 +468,7 @@ export default function InspectionsPage() {
   // --------------------------
   // Update answers state
   // --------------------------
-  const updateAnswer = (
-    index: number,
-    patch: Partial<ModalAnswer>
-  ) => {
+  const updateAnswer = (index: number, patch: Partial<ModalAnswer>) => {
     setAnswers((prev) =>
       prev.map((a, i) => (i === index ? { ...a, ...patch } : a))
     );
@@ -387,8 +492,9 @@ export default function InspectionsPage() {
   // Save (in_progress) or complete
   // --------------------------
   const computeScore = (items: InspectionItem[]): number | null => {
-    const scored = items.filter((it) =>
-      it.type === "yes_no_na" || it.type === "good_fair_poor"
+    const scored = items.filter(
+      (it) =>
+        it.type === "yes_no_na" || it.type === "good_fair_poor"
     );
     if (!scored.length) return null;
 
@@ -501,7 +607,6 @@ export default function InspectionsPage() {
     // Logo
     if (templateLogo) {
       try {
-        // small square logo
         doc.addImage(templateLogo, "PNG", 15, y - 5, 20, 20);
         y += 20;
       } catch (e) {
