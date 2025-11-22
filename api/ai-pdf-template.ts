@@ -1,67 +1,68 @@
-import type { VercelRequest, VercelResponse } from "@vercel/node";
+// api/ai-pdf-template.ts
 import OpenAI from "openai";
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+/**
+ * Vercel serverless function to turn extracted PDF text
+ * into an AuditKing template using OpenAI.
+ *
+ * It expects a POST with JSON:
+ * {
+ *   text: string;
+ *   maxSections?: number;
+ *   maxQuestionsPerSection?: number;
+ * }
+ */
+export default async function handler(req: any, res: any) {
+  // Only allow POST
   if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    return res.status(405).json({ error: "Method not allowed" });
+    res.status(405).json({ error: "Method not allowed" });
+    return;
   }
 
-  // Basic safety checks
+  // Check API key
   if (!process.env.OPENAI_API_KEY) {
-    return res.status(500).json({
-      error:
-        "OPENAI_API_KEY is not set. Please configure it in your Vercel environment.",
-    });
+    res
+      .status(500)
+      .json({ error: "OPENAI_API_KEY is not set in environment" });
+    return;
   }
 
   try {
     const body = req.body || {};
-    const text = typeof body.text === "string" ? body.text : "";
+    const {
+      text,
+      maxSections = 12,
+      maxQuestionsPerSection = 30,
+    } = body;
 
-    if (!text.trim()) {
-      return res.status(400).json({
-        error: "Missing 'text' in request body. The client must send extracted PDF text.",
-      });
+    if (!text || typeof text !== "string") {
+      res.status(400).json({ error: "Missing 'text' in request body" });
+      return;
     }
 
-    // Call OpenAI to turn raw PDF text into a structured template definition
-    const completion = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a helper that converts safety inspection PDFs into a JSON template format for the AuditKing app.",
-        },
-        {
-          role: "user",
-          content: `
-You will be given raw text extracted from a PDF inspection form.
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
 
-Return a JSON object with this shape, and **only** that JSON (no extra text):
+    const systemPrompt = `
+You convert checklist PDFs into JSON templates for an inspections app called AuditKing.
+
+Return ONLY a JSON object with this exact structure (no extra properties):
 
 {
-  "name": "Short template name",
-  "description": "1-2 sentence description",
+  "name": string,                     // short template name
+  "description": string,              // short description
   "sections": [
     {
-      "id": "section-1",
-      "title": "Section title",
-      "image_data_url": null,
+      "title": string,
       "questions": [
         {
-          "id": "q-1",
-          "label": "Question text",
+          "label": string,            // the question text
           "type": "yes_no_na" | "good_fair_poor" | "multiple_choice" | "text",
-          "options": ["Option 1","Option 2"],
-          "allowNotes": true,
-          "allowPhoto": true,
-          "required": true
+          "options": string[],        // for multiple_choice only, otherwise []
+          "allowNotes": boolean,
+          "allowPhoto": boolean,
+          "required": boolean
         }
       ]
     }
@@ -69,57 +70,59 @@ Return a JSON object with this shape, and **only** that JSON (no extra text):
 }
 
 Rules:
-- Use "yes_no_na" for yes/no/N/A style questions.
-- Use "good_fair_poor" for rating-style questions.
-- Use "multiple_choice" if there are 3+ fixed options.
-- Use "text" for free-text fields or comments.
-- id fields can be simple like "section-1", "q-1", etc.
-- Do not invent more than ~30 questions even if the text is long.
-- If you're unsure, err on the side of fewer, clearer questions.
+- Use at most maxSections sections.
+- Use at most maxQuestionsPerSection questions per section.
+- Prefer "yes_no_na" for simple pass/fail items.
+- Use "good_fair_poor" for quality / condition checks.
+- Use "multiple_choice" only when the text clearly lists discrete options.
+- Otherwise use "text".
+- Make clear, short question labels.
+- Do NOT include any commentary; just the JSON object.
+`;
 
-Here is the raw PDF text:
+    const userPrompt = {
+      text,
+      maxSections,
+      maxQuestionsPerSection,
+    };
 
-${text}
-`,
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: JSON.stringify(userPrompt),
         },
       ],
+      // Force pure JSON output
+      response_format: { type: "json_object" },
       temperature: 0.2,
     });
 
-    const raw = completion.choices[0]?.message?.content || "";
+    const content = completion.choices[0]?.message?.content || "{}";
 
     let parsed: any;
     try {
-      parsed = JSON.parse(raw);
-    } catch (jsonErr) {
-      console.error("Failed to parse OpenAI JSON:", raw);
-      return res.status(500).json({
-        error: "OpenAI returned invalid JSON. Check server logs for details.",
+      parsed = JSON.parse(content);
+    } catch (e) {
+      console.error("JSON parse error from OpenAI:", e, content);
+      res.status(500).json({
+        error: "Model returned invalid JSON",
       });
+      return;
     }
 
-    if (!parsed || !parsed.sections || !Array.isArray(parsed.sections)) {
-      return res.status(500).json({
-        error:
-          "OpenAI response did not contain a valid 'sections' array. Please adjust the PDF or prompt.",
-      });
+    // Basic sanity checks
+    if (!Array.isArray(parsed.sections)) {
+      parsed.sections = [];
     }
 
-    // This is the structure your front-end expects for a new template
-    return res.status(200).json({
-      template: {
-        name: parsed.name || "Imported template",
-        description: parsed.description || "",
-        definition: {
-          sections: parsed.sections,
-        },
-      },
-    });
+    res.status(200).json(parsed);
   } catch (err: any) {
-    console.error("import-template-from-pdf error", err);
-    return res.status(500).json({
-      error: "Unexpected server error in import-template-from-pdf",
-      detail: err?.message || String(err),
+    console.error("ai-pdf-template error:", err);
+    res.status(500).json({
+      error: err?.message || "Unexpected server error",
     });
   }
 }
