@@ -1,4 +1,9 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") {
@@ -6,116 +11,115 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
+  // Basic safety checks
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(500).json({
+      error:
+        "OPENAI_API_KEY is not set. Please configure it in your Vercel environment.",
+    });
+  }
+
   try {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      return res
-        .status(500)
-        .json({ error: "OPENAI_API_KEY is not configured on the server." });
+    const body = req.body || {};
+    const text = typeof body.text === "string" ? body.text : "";
+
+    if (!text.trim()) {
+      return res.status(400).json({
+        error: "Missing 'text' in request body. The client must send extracted PDF text.",
+      });
     }
 
-    const { text, maxSections = 10, maxQuestionsPerSection = 20 } = req.body || {};
+    // Call OpenAI to turn raw PDF text into a structured template definition
+    const completion = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a helper that converts safety inspection PDFs into a JSON template format for the AuditKing app.",
+        },
+        {
+          role: "user",
+          content: `
+You will be given raw text extracted from a PDF inspection form.
 
-    if (!text || typeof text !== "string") {
-      return res.status(400).json({ error: "Missing 'text' in request body." });
+Return a JSON object with this shape, and **only** that JSON (no extra text):
+
+{
+  "name": "Short template name",
+  "description": "1-2 sentence description",
+  "sections": [
+    {
+      "id": "section-1",
+      "title": "Section title",
+      "image_data_url": null,
+      "questions": [
+        {
+          "id": "q-1",
+          "label": "Question text",
+          "type": "yes_no_na" | "good_fair_poor" | "multiple_choice" | "text",
+          "options": ["Option 1","Option 2"],
+          "allowNotes": true,
+          "allowPhoto": true,
+          "required": true
+        }
+      ]
     }
+  ]
+}
 
-    // Call OpenAI Chat Completions API directly via fetch
-    const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        temperature: 0.2,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "You convert safety / inspection PDF text into structured checklist templates for a web app. " +
-              "You must ONLY return valid JSON matching the required schema. No explanations.",
-          },
-          {
-            role: "user",
-            content: [
-              "Here is the raw text of a PDF checklist. ",
-              "Extract a structured inspection template with up to ",
-              String(maxSections),
-              " sections, each with up to ",
-              String(maxQuestionsPerSection),
-              " questions.",
-              "",
-              "Required JSON shape:",
-              "",
-              "{",
-              '  "name": string,',
-              '  "description": string,',
-              '  "sections": [',
-              "    {",
-              '      "title": string,',
-              '      "questions": [',
-              "        {",
-              '          "label": string,',
-              '          "type": "yes_no_na" | "good_fair_poor" | "multiple_choice" | "text",',
-              "          // if type === multiple_choice",
-              '          "options": string[],',
-              "          // optional flags, default true",
-              '          "allowNotes": boolean,',
-              '          "allowPhoto": boolean,',
-              '          "required": boolean',
-              "        }",
-              "      ]",
-              "    }",
-              "  ]",
-              "}",
-              "",
-              "Heuristics:",
-              "- Group logically related lines into sections by headings.",
-              "- Use yes_no_na for typical compliance checks (Yes/No/N/A).",
-              "- Use good_fair_poor for quality-style ratings.",
-              "- Use multiple_choice if there are explicit answer options.",
-              "- Use text for free-form comments or description fields.",
-              "",
-              "Return ONLY the JSON. No comments, no markdown.",
-              "",
-              "PDF text starts here:",
-              text,
-            ].join("\n"),
-          },
-        ],
-      }),
+Rules:
+- Use "yes_no_na" for yes/no/N/A style questions.
+- Use "good_fair_poor" for rating-style questions.
+- Use "multiple_choice" if there are 3+ fixed options.
+- Use "text" for free-text fields or comments.
+- id fields can be simple like "section-1", "q-1", etc.
+- Do not invent more than ~30 questions even if the text is long.
+- If you're unsure, err on the side of fewer, clearer questions.
+
+Here is the raw PDF text:
+
+${text}
+`,
+        },
+      ],
+      temperature: 0.2,
     });
 
-    if (!openaiRes.ok) {
-      const body = await openaiRes.text();
-      console.error("OpenAI error:", openaiRes.status, body);
-      return res
-        .status(500)
-        .json({ error: "OpenAI request failed. Check server logs." });
-    }
+    const raw = completion.choices[0]?.message?.content || "";
 
-    const data = await openaiRes.json();
-    const content = data?.choices?.[0]?.message?.content;
-    if (!content) {
-      return res.status(500).json({ error: "No content from OpenAI." });
-    }
-
-    let parsed;
+    let parsed: any;
     try {
-      parsed = JSON.parse(content);
-    } catch (e) {
-      console.error("JSON parse error from OpenAI content:", content);
-      return res
-        .status(500)
-        .json({ error: "OpenAI returned invalid JSON. Check logs." });
+      parsed = JSON.parse(raw);
+    } catch (jsonErr) {
+      console.error("Failed to parse OpenAI JSON:", raw);
+      return res.status(500).json({
+        error: "OpenAI returned invalid JSON. Check server logs for details.",
+      });
     }
 
-    return res.status(200).json(parsed);
+    if (!parsed || !parsed.sections || !Array.isArray(parsed.sections)) {
+      return res.status(500).json({
+        error:
+          "OpenAI response did not contain a valid 'sections' array. Please adjust the PDF or prompt.",
+      });
+    }
+
+    // This is the structure your front-end expects for a new template
+    return res.status(200).json({
+      template: {
+        name: parsed.name || "Imported template",
+        description: parsed.description || "",
+        definition: {
+          sections: parsed.sections,
+        },
+      },
+    });
   } catch (err: any) {
-    console.error("ai-pdf-template handler error:", err);
-    return res.status(500).json({ error: err?.message || "Unexpected error." });
+    console.error("import-template-from-pdf error", err);
+    return res.status(500).json({
+      error: "Unexpected server error in import-template-from-pdf",
+      detail: err?.message || String(err),
+    });
   }
 }
