@@ -166,6 +166,7 @@ export default function InspectionsPage() {
 
   const isAdmin = role === "admin";
   const isManager = role === "manager";
+  const canDuplicate = isAdmin || isManager;
   // NOTE: we are now allowing *everyone* to see all inspections,
   // so we do NOT filter by owner_user_id anymore.
 
@@ -417,7 +418,7 @@ export default function InspectionsPage() {
   };
 
   // --------------------------
-  // Save (in_progress) or submitted (Completed)
+  // Score & items builder
   // --------------------------
   const computeScore = (items: InspectionItem[]): number | null => {
     const scored = items.filter(
@@ -464,6 +465,9 @@ export default function InspectionsPage() {
     }));
   };
 
+  // --------------------------
+  // Save (in_progress) or submitted (Completed)
+  // --------------------------
   const saveInspection = async (markComplete: boolean) => {
     if (!activeInspection) return;
     setModalSaving(true);
@@ -517,6 +521,47 @@ export default function InspectionsPage() {
       alert(e?.message || "Could not save inspection.");
     } finally {
       setModalSaving(false);
+    }
+  };
+
+  // --------------------------
+  // NEW: Duplicate inspection (manager/admin)
+  // --------------------------
+  const duplicateInspection = async (insp: InspectionRow) => {
+    if (!canDuplicate) {
+      alert("Only managers and admins can duplicate inspections.");
+      return;
+    }
+    try {
+      const items: InspectionItem[] = insp.items || [];
+      const score = computeScore(items);
+      const nowIso = new Date().toISOString();
+
+      const ownerId = currentUserId || insp.owner_user_id;
+      const ownerName =
+        currentUserName || insp.owner_name || "Inspector";
+
+      const { error } = await supabase.from("inspections").insert({
+        template_id: insp.template_id,
+        template_name: insp.template_name,
+        site_id: insp.site_id,
+        site: insp.site,
+        status: "in_progress",
+        started_at: nowIso,
+        submitted_at: null,
+        score,
+        items,
+        owner_user_id: ownerId,
+        owner_name: ownerName,
+      });
+
+      if (error) throw error;
+
+      await loadInspections();
+      alert("Inspection duplicated. You can now continue it from the list.");
+    } catch (e: any) {
+      console.error("duplicateInspection error", e);
+      alert(e?.message || "Could not duplicate inspection.");
     }
   };
 
@@ -996,6 +1041,8 @@ export default function InspectionsPage() {
                     onOpen={() => openInspectionModal(insp)}
                     onDeleted={loadInspections}
                     isAdmin={isAdmin}
+                    canDuplicate={canDuplicate}
+                    onDuplicate={() => duplicateInspection(insp)}
                   />
                 ))}
               </div>
@@ -1019,6 +1066,8 @@ export default function InspectionsPage() {
                     onOpen={() => openInspectionModal(insp)}
                     onDeleted={loadInspections}
                     isAdmin={isAdmin}
+                    canDuplicate={canDuplicate}
+                    onDuplicate={() => duplicateInspection(insp)}
                   />
                 ))}
               </div>
@@ -1366,6 +1415,8 @@ type InspectionRowCardProps = {
   onOpen: () => void;
   onDeleted: () => void;
   isAdmin: boolean;
+  canDuplicate: boolean;
+  onDuplicate: () => void;
 };
 
 function InspectionRowCard({
@@ -1376,6 +1427,8 @@ function InspectionRowCard({
   onOpen,
   onDeleted,
   isAdmin,
+  canDuplicate,
+  onDuplicate,
 }: InspectionRowCardProps) {
   const deleteOne = async () => {
     if (!isAdmin) {
@@ -1450,6 +1503,14 @@ function InspectionRowCard({
         >
           {insp.status === "in_progress" ? "Continue" : "View"}
         </button>
+        {canDuplicate && (
+          <button
+            onClick={onDuplicate}
+            className="px-3 py-1 rounded-xl border hover:bg-gray-50"
+          >
+            Duplicate
+          </button>
+        )}
         {isAdmin && (
           <button
             onClick={deleteOne}
