@@ -1,21 +1,30 @@
 // api/ai-pdf-template.js
-// Hybrid PDF → template converter:
-// 1) Rule-based for "Area = ... / Check ..." style PDFs
-// 2) Fallback to OpenAI for everything else (if OPENAI_API_KEY is set)
+// CommonJS version for Vercel Node runtime
 
-let OpenAI = null;
-try {
-  // Only require OpenAI if available
-  OpenAI = require("openai");
-} catch (e) {
-  // It's okay if it's not installed in some environments
-  console.warn("openai package not found, AI fallback will be disabled.");
+const OpenAI = require("openai");
+
+/**
+ * Helper: count total questions in sections
+ */
+function countQuestions(sections) {
+  return sections.reduce(
+    (acc, s) => acc + (s.questions ? s.questions.length : 0),
+    0
+  );
 }
 
-// --------- Rule-based converter for "Area = ... / Check ..." style ---------
+/**
+ * Rule-based parser for STOMPERS-style checklists:
+ * - Uses "Area = X" as sections
+ * - Uses "Check ..." lines as questions
+ * - Most questions end with "Good Fair Poor N/A" -> good_fair_poor
+ */
+function parseChecklistFromText(rawText, maxSections = 50, maxQuestionsPerSection = 100) {
+  if (!rawText || typeof rawText !== "string") {
+    return null;
+  }
 
-function buildSectionsFromText(rawText) {
-  const lines = (rawText || "")
+  const lines = rawText
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
@@ -23,36 +32,50 @@ function buildSectionsFromText(rawText) {
   const sections = [];
   let currentSection = null;
 
-  const isNoiseLine = (line) => {
-    const upper = line.toUpperCase();
-    if (upper === "GOOD FAIR POOR N/A") return true;
-    if (upper === "RESPONSE") return true;
-    if (upper.startsWith("NEW TITLE -")) return true;
-    return false;
+  const startSection = (title) => {
+    if (currentSection && currentSection.questions.length > 0) {
+      sections.push(currentSection);
+    }
+    currentSection = {
+      title: title || "Section",
+      questions: [],
+    };
   };
 
-  for (const line of lines) {
-    // Start of a new area
-    if (/^AREA\s*=/i.test(line)) {
-      const title = line.replace(/^AREA\s*=/i, "").trim() || "Area";
-      currentSection = {
-        title,
-        questions: [],
-      };
-      sections.push(currentSection);
+  for (let line of lines) {
+    // Ignore "RESPONSE" and "NEW TITLE - ..." helper lines
+    if (/^RESPONSE\b/i.test(line)) continue;
+    if (/^NEW TITLE\b/i.test(line)) continue;
+
+    // Area = X -> new section
+    const areaMatch = line.match(/^Area\s*=\s*(.+)$/i);
+    if (areaMatch) {
+      const areaTitle = areaMatch[1].trim();
+      startSection(areaTitle);
       continue;
     }
 
-    // Skip obvious scoring / layout noise
-    if (isNoiseLine(line)) {
-      continue;
-    }
+    // "Check ..." lines -> questions
+    if (/^(Check|Chcek)/i.test(line)) {
+      // Strip common rating tails like "Good Fair Poor N/A"
+      line = line.replace(/\bGood\s+Fair\s+Poor\s+N\/A\b.*$/i, "").trim();
 
-    // Everything else within an Area becomes a question
-    if (currentSection) {
+      // Sometimes it might still end with "Good Fair Poor N/A" without N/A spacing variations,
+      // so defensively remove again.
+      line = line.replace(/\bGood\s+Fair\s+Poor\b.*$/i, "").trim();
+
+      if (!line) continue;
+
+      let label = line;
+
+      // Ensure we have a section to put it in
+      if (!currentSection) {
+        startSection("General checks");
+      }
+
       currentSection.questions.push({
-        label: line,
-        type: "good_fair_poor", // matches the Good / Fair / Poor / N/A style
+        label,
+        type: "good_fair_poor",
         options: [],
         allowNotes: true,
         allowPhoto: true,
@@ -61,35 +84,112 @@ function buildSectionsFromText(rawText) {
     }
   }
 
-  // Remove any sections with no questions
-  return sections.filter((sec) => sec.questions.length > 0);
-}
-
-function countAreaMarkers(text) {
-  if (!text) return 0;
-  const matches = text.match(/Area\s*=/gi);
-  return matches ? matches.length : 0;
-}
-
-// --------- OpenAI fallback ---------
-
-async function generateWithOpenAI(text, maxSections, maxQuestionsPerSection) {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error(
-      "OPENAI_API_KEY is not set in environment and rule-based parser did not match."
-    );
-  }
-  if (!OpenAI) {
-    throw new Error(
-      "openai package is not installed but OPENAI_API_KEY is set."
-    );
+  // Flush last section
+  if (currentSection && currentSection.questions.length > 0) {
+    sections.push(currentSection);
   }
 
-  const client = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
+  // Trim by limits
+  const trimmedSections = sections.slice(0, maxSections).map((sec) => {
+    const qs = (sec.questions || []).slice(0, maxQuestionsPerSection);
+    return { ...sec, questions: qs };
   });
 
-  const systemPrompt = `
+  const totalQuestions = countQuestions(trimmedSections);
+
+  // If we didn't find anything meaningful, return null so we can fall back to AI
+  if (!trimmedSections.length || totalQuestions === 0) {
+    return null;
+  }
+
+  // Basic name / description
+  const name = "Imported checklist";
+  const description =
+    "Template imported from PDF checklist using rule-based parser.";
+
+  return {
+    name,
+    description,
+    sections: trimmedSections,
+  };
+}
+
+/**
+ * Main handler – tries rule-based parsing first,
+ * then falls back to OpenAI JSON output.
+ *
+ * Expected POST body:
+ * {
+ *   text: string;
+ *   maxSections?: number;
+ *   maxQuestionsPerSection?: number;
+ * }
+ */
+async function handler(req, res) {
+  // Method check
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "Method not allowed" });
+    return;
+  }
+
+  // Ensure body is an object
+  let body = req.body;
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body);
+    } catch (e) {
+      res.status(400).json({ error: "Invalid JSON body" });
+      return;
+    }
+  }
+
+  const {
+    text,
+    maxSections = 50,
+    maxQuestionsPerSection = 100,
+  } = body || {};
+
+  if (!text || typeof text !== "string") {
+    res.status(400).json({ error: "Missing 'text' in request body" });
+    return;
+  }
+
+  // 1) Try rule-based parser first (for STOMPERS-style checklists)
+  try {
+    const ruleResult = parseChecklistFromText(
+      text,
+      maxSections,
+      maxQuestionsPerSection
+    );
+
+    if (ruleResult) {
+      // If we got a decent number of questions, just return this
+      const totalQuestions = countQuestions(ruleResult.sections);
+      if (totalQuestions >= 10) {
+        res.status(200).json(ruleResult);
+        return;
+      }
+      // If it's tiny, we still fall through to AI below
+    }
+  } catch (e) {
+    console.error("Rule-based parser error:", e);
+    // We don't fail here; we just fall back to AI
+  }
+
+  // 2) Fallback to OpenAI if rule-based parser not sufficient
+  if (!process.env.OPENAI_API_KEY) {
+    res
+      .status(500)
+      .json({ error: "OPENAI_API_KEY is not set in environment" });
+    return;
+  }
+
+  try {
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+
+    const systemPrompt = `
 You convert checklist PDFs into JSON templates for an inspections app called AuditKing.
 
 Return ONLY a JSON object with this exact structure (no extra properties):
@@ -115,8 +215,8 @@ Return ONLY a JSON object with this exact structure (no extra properties):
 }
 
 Rules:
-- Use at most maxSections sections.
-- Use at most maxQuestionsPerSection questions per section.
+- Use at most ${maxSections} sections.
+- Use at most ${maxQuestionsPerSection} questions per section.
 - Prefer "yes_no_na" for simple pass/fail items.
 - Use "good_fair_poor" for quality / condition checks.
 - Use "multiple_choice" only when the text clearly lists discrete options.
@@ -125,96 +225,49 @@ Rules:
 - Do NOT include any commentary; just the JSON object.
 `;
 
-  const userPrompt = {
-    text,
-    maxSections,
-    maxQuestionsPerSection,
-  };
-
-  const completion = await client.chat.completions.create({
-    model: "gpt-4.1-mini",
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: JSON.stringify(userPrompt) },
-    ],
-    response_format: { type: "json_object" },
-    temperature: 0.2,
-  });
-
-  const content = completion.choices[0]?.message?.content || "{}";
-  let parsed;
-  try {
-    parsed = JSON.parse(content);
-  } catch (e) {
-    console.error("JSON parse error from OpenAI:", e, content);
-    throw new Error("Model returned invalid JSON");
-  }
-
-  if (!Array.isArray(parsed.sections)) {
-    parsed.sections = [];
-  }
-
-  return parsed;
-}
-
-// --------- Main handler ---------
-
-async function handler(req, res) {
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method not allowed" });
-    return;
-  }
-
-  try {
-    const body = req.body || {};
-    const {
-      text,
-      maxSections = 12,
-      maxQuestionsPerSection = 30,
-    } = body;
-
-    if (!text || typeof text !== "string") {
-      res.status(400).json({ error: "Missing 'text' in request body" });
-      return;
-    }
-
-    // 1) Try rule-based STOMPERS-style converter first
-    const areaCount = countAreaMarkers(text);
-    let sections = [];
-
-    if (areaCount >= 3) {
-      sections = buildSectionsFromText(text);
-    }
-
-    const totalQuestions =
-      sections.reduce((acc, s) => acc + (s.questions?.length || 0), 0) || 0;
-
-    if (sections.length > 0 && totalQuestions >= 5) {
-      // Looks like a good rule-based result – return it
-      const result = {
-        name: "Imported checklist",
-        description:
-          "Template imported from PDF using rule-based converter (Area = ... / Check ...).",
-        sections,
-      };
-      res.status(200).json(result);
-      return;
-    }
-
-    // 2) Fallback to OpenAI for anything else / non-matching PDFs
-    const aiResult = await generateWithOpenAI(
+    const userPrompt = {
       text,
       maxSections,
-      maxQuestionsPerSection
-    );
-    res.status(200).json(aiResult);
+      maxQuestionsPerSection,
+    };
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: JSON.stringify(userPrompt),
+        },
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.2,
+    });
+
+    const content = completion.choices[0]?.message?.content || "{}";
+
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch (e) {
+      console.error("JSON parse error from OpenAI:", e, content);
+      res.status(500).json({
+        error: "Model returned invalid JSON",
+      });
+      return;
+    }
+
+    if (!Array.isArray(parsed.sections)) {
+      parsed.sections = [];
+    }
+
+    res.status(200).json(parsed);
   } catch (err) {
-    console.error("ai-pdf-template hybrid error:", err);
+    console.error("ai-pdf-template error:", err);
     res.status(500).json({
-      error: err && err.message ? err.message : "Unexpected server error",
+      error: err?.message || "Unexpected server error",
     });
   }
 }
 
-// CommonJS export for Vercel
 module.exports = handler;
