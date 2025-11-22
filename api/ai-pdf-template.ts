@@ -1,5 +1,4 @@
 // api/ai-pdf-template.ts
-import OpenAI from "openai";
 
 /**
  * Vercel serverless function to turn extracted PDF text
@@ -19,11 +18,25 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
-  // Check API key
+  // ---- DEBUG 1: check env var is visible on the server ----
   if (!process.env.OPENAI_API_KEY) {
-    res
-      .status(500)
-      .json({ error: "OPENAI_API_KEY is not set in environment" });
+    res.status(500).json({
+      error: "OPENAI_API_KEY is not set in Vercel environment",
+    });
+    return;
+  }
+
+  let OpenAI: any;
+  try {
+    // ---- DEBUG 2: import openai *inside* the handler so we can see errors ----
+    const mod = await import("openai");
+    OpenAI = mod.default || (mod as any).OpenAI || mod;
+  } catch (err: any) {
+    console.error("OpenAI import failed:", err);
+    res.status(500).json({
+      error: "OpenAI import failed",
+      detail: String(err?.message || err),
+    });
     return;
   }
 
@@ -40,7 +53,7 @@ export default async function handler(req: any, res: any) {
       return;
     }
 
-    const openai = new OpenAI({
+    const client = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
 
@@ -86,9 +99,8 @@ Rules:
       maxQuestionsPerSection,
     };
 
-    const completion = await openai.chat.completions.create({
-      // 👇 IMPORTANT: use gpt-4o-mini here
-      model: "gpt-4o-mini",
+    const completion = await client.chat.completions.create({
+      model: "gpt-4.1-mini",
       messages: [
         { role: "system", content: systemPrompt },
         {
@@ -96,7 +108,6 @@ Rules:
           content: JSON.stringify(userPrompt),
         },
       ],
-      // Force pure JSON output
       response_format: { type: "json_object" },
       temperature: 0.2,
     });
@@ -114,7 +125,6 @@ Rules:
       return;
     }
 
-    // Basic sanity checks
     if (!Array.isArray(parsed.sections)) {
       parsed.sections = [];
     }
