@@ -19,6 +19,11 @@ type TemplateQuestion = {
 type TemplateSection = {
   id: string;
   title: string;
+
+  // NEW: optional “page” metadata – backwards-compatible
+  page_title?: string | null;
+  page_break_before?: boolean;
+
   image_data_url?: string | null;
   questions: TemplateQuestion[];
 };
@@ -157,6 +162,8 @@ export default function TemplateEditorPage({ mode }: Props) {
             {
               id: randomId("sec"),
               title: "Section 1",
+              page_title: "Page 1",
+              page_break_before: false, // first section = first page
               image_data_url: null,
               questions: [
                 {
@@ -200,6 +207,8 @@ export default function TemplateEditorPage({ mode }: Props) {
       {
         id: randomId("sec"),
         title: `Section ${prev.length + 1}`,
+        page_title: `Page ${prev.length + 1}`,
+        page_break_before: prev.length > 0, // new page starting from section 2+
         image_data_url: null,
         questions: [],
       },
@@ -307,6 +316,8 @@ export default function TemplateEditorPage({ mode }: Props) {
     const cleanedSections: TemplateSection[] = sections.map((s) => ({
       ...s,
       title: s.title || "",
+      page_title: s.page_title ?? null,
+      page_break_before: !!s.page_break_before,
       questions: s.questions.map((q) => ({
         ...q,
         label: q.label || "",
@@ -558,7 +569,7 @@ export default function TemplateEditorPage({ mode }: Props) {
                 className="rounded-2xl border bg.White p-4 space-y-3"
               >
                 <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 space-y-2">
+                  <div className="flex-1 space-y-3">
                     <div>
                       <label className="block text-[11px] text-gray-500 mb-1">
                         Section title
@@ -574,6 +585,42 @@ export default function TemplateEditorPage({ mode }: Props) {
                         placeholder="E.g. Housekeeping"
                       />
                     </div>
+
+                    {/* NEW: page settings */}
+                    <div className="grid md:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] text-gray-500 mb-1">
+                          Page title (optional)
+                        </label>
+                        <input
+                          value={section.page_title ?? ""}
+                          onChange={(e) =>
+                            updateSection(section.id, {
+                              page_title: e.target.value || null,
+                            })
+                          }
+                          className="w-full border rounded-xl px-3 py-2 text-sm"
+                          placeholder="E.g. Ground floor checks"
+                        />
+                      </div>
+                      <div className="flex items-center mt-5">
+                        <label className="inline-flex items-center gap-2 text-[11px]">
+                          <input
+                            type="checkbox"
+                            checked={!!section.page_break_before}
+                            onChange={(e) =>
+                              updateSection(section.id, {
+                                page_break_before: e.target.checked,
+                              })
+                            }
+                          />
+                          <span>
+                            Start a new PDF page before this section
+                          </span>
+                        </label>
+                      </div>
+                    </div>
+
                     <div className="flex items-center gap-3">
                       {section.image_data_url && (
                         <img
