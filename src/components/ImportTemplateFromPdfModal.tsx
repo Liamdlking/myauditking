@@ -41,7 +41,7 @@ type TemplateDefinition = {
 };
 
 // ---------- CONFIG: increase how much PDF text we send to OpenAI ----------
-const MAX_TEXT_CHARS = 80000; // was 20000 – this should cover 10–15 pages of questions comfortably
+const MAX_TEXT_CHARS = 120000; // was 20000 – this should cover 10–15 pages of questions comfortably
 
 // Simple ID helper
 function randomId(prefix: string) {
@@ -173,7 +173,7 @@ const ImportTemplateFromPdfModal: React.FC<ImportTemplateFromPdfModalProps> = ({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           text: textToSend,
-          maxSections: 20,
+          maxSections: 50,
           maxQuestionsPerSection: 40,
         }),
       });
