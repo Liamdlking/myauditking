@@ -167,8 +167,7 @@ export default function InspectionsPage() {
   const isAdmin = role === "admin";
   const isManager = role === "manager";
   const canDuplicate = isAdmin || isManager;
-  // NOTE: we are now allowing *everyone* to see all inspections,
-  // so we do NOT filter by owner_user_id anymore.
+  // Everyone can see all inspections now.
 
   // --------------------------
   // Load sites
@@ -244,7 +243,6 @@ export default function InspectionsPage() {
   // --------------------------
   const filteredInspections = useMemo(() => {
     return inspections.filter((insp) => {
-      // ✅ Everyone can see all inspections now, no owner filter
       if (selectedSiteId !== "all" && insp.site_id !== selectedSiteId) {
         return false;
       }
@@ -387,7 +385,6 @@ export default function InspectionsPage() {
           ? {
               ...a,
               ...patch,
-              // on any change, stamp who answered it
               answered_by_user_id: currentUserId || a.answered_by_user_id,
               answered_by_name: currentUserName || a.answered_by_name,
             }
@@ -475,13 +472,11 @@ export default function InspectionsPage() {
       const items = buildItemsFromAnswers();
 
       if (markComplete) {
-        // validate required
         const missingRequired = items.some((it) => {
           if (!it.required) return false;
           if (it.type === "text") {
             return !it.value || it.value.trim() === "";
           }
-          // choice-based
           return !it.choice_key;
         });
         if (missingRequired) {
@@ -574,7 +569,6 @@ export default function InspectionsPage() {
     const doc = new jsPDF("p", "mm", "a4");
     let y = 15;
 
-    // Logo
     if (templateLogo) {
       try {
         doc.addImage(templateLogo, "PNG", 15, y - 5, 20, 20);
@@ -584,7 +578,6 @@ export default function InspectionsPage() {
       }
     }
 
-    // Header text
     doc.setFontSize(14);
     doc.text(activeInspection.template_name, 15, y);
     y += 7;
@@ -619,7 +612,7 @@ export default function InspectionsPage() {
     const pageHeight = doc.internal.pageSize.getHeight();
 
     const addTextWrapped = (text: string, x: number, yPos: number) => {
-      const maxWidth = 180; // mm
+      const maxWidth = 180;
       const lines = doc.splitTextToSize(text, maxWidth);
       for (const line of lines) {
         if (yPos > pageHeight - 15) {
@@ -632,7 +625,6 @@ export default function InspectionsPage() {
       return yPos;
     };
 
-    // Build a lookup from answers
     const answerByKey = new Map<string, ModalAnswer>();
     for (const a of answers) {
       answerByKey.set(`${a.section_id}:${a.question_id}`, a);
@@ -763,7 +755,6 @@ export default function InspectionsPage() {
       );
 
       for (const insp of targets) {
-        // fetch template + logo + definition
         const { data: tpl, error: tplErr } = await supabase
           .from("templates")
           .select("definition, logo_data_url")
@@ -846,7 +837,6 @@ export default function InspectionsPage() {
           return yPos;
         };
 
-        // Build quick lookup
         const itemsByKey = new Map<string, InspectionItem>();
         for (const it of items) {
           itemsByKey.set(`${it.section_id}:${it.question_id}`, it);
@@ -971,7 +961,6 @@ export default function InspectionsPage() {
             >
               <option value="all">All</option>
               <option value="in_progress">In progress</option>
-              {/* DB value 'submitted', label 'Completed' */}
               <option value="submitted">Completed</option>
             </select>
           </div>
@@ -1024,7 +1013,6 @@ export default function InspectionsPage() {
         </div>
       ) : (
         <div className="space-y-4">
-          {/* In progress */}
           {inProgress.length > 0 && (
             <div className="space-y-2">
               <h2 className="text-sm font-semibold text-gray-700">
@@ -1049,7 +1037,6 @@ export default function InspectionsPage() {
             </div>
           )}
 
-          {/* Completed (status = submitted) */}
           {submitted.length > 0 && (
             <div className="space-y-2">
               <h2 className="text-sm font-semibold text-gray-700">
@@ -1076,7 +1063,6 @@ export default function InspectionsPage() {
         </div>
       )}
 
-      {/* Modal */}
       {modalOpen && activeInspection && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
           <div className="w-full max-w-5xl max-h-[90vh] overflow-auto rounded-2xl bg-white shadow-xl p-5 space-y-4">
@@ -1117,7 +1103,7 @@ export default function InspectionsPage() {
 
                 <div className="flex flex-col md:flex-row gap-4">
                   <div className="flex-1 space-y-3">
-                    {activeDefinition.sections.map((section) => (
+                    {(activeDefinition.sections || []).map((section) => (
                       <div
                         key={section.id}
                         className="border rounded-2xl p-3 bg-gray-50 space-y-3"
@@ -1136,7 +1122,7 @@ export default function InspectionsPage() {
                         </div>
 
                         <div className="space-y-2">
-                          {section.questions.map((q) => {
+                          {(section.questions || []).map((q) => {
                             const idx = answers.findIndex(
                               (a) =>
                                 a.section_id === section.id &&
@@ -1171,7 +1157,6 @@ export default function InspectionsPage() {
                                   </div>
                                 </div>
 
-                                {/* Answer controls */}
                                 {q.type === "yes_no_na" && (
                                   <div className="flex flex-wrap gap-3">
                                     {[
@@ -1344,7 +1329,6 @@ export default function InspectionsPage() {
                     ))}
                   </div>
 
-                  {/* Side panel */}
                   <div className="w-full md:w-64 space-y-3 text-xs">
                     <div className="border rounded-2xl p-3 bg-gray-50 space-y-1">
                       <div className="font-semibold text-gray-800">
