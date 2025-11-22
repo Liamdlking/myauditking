@@ -1,78 +1,84 @@
-// api/ai-pdf-template.js
-
-// Simple Node/Vercel serverless function using CommonJS + fetch.
-// No ESM, no OpenAI SDK – just a direct HTTPS call to OpenAI.
+// api/ai-pdf-template.ts
+import OpenAI from "openai";
 
 /**
- * Expected POST body:
+ * Vercel serverless function to turn extracted PDF text
+ * into an AuditKing template using OpenAI.
+ *
+ * Expects a POST with JSON:
  * {
- *   "text": string,
- *   "maxSections"?: number,
- *   "maxQuestionsPerSection"?: number
+ *   text: string;
+ *   maxSections?: number;
+ *   maxQuestionsPerSection?: number;
  * }
  */
+export default async function handler(req: any, res: any) {
+  // Only allow POST
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "Method not allowed" });
+    return;
+  }
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+  // Check API key
+  if (!process.env.OPENAI_API_KEY) {
+    res
+      .status(500)
+      .json({ error: "OPENAI_API_KEY is not set in environment" });
+    return;
+  }
 
-async function handler(req, res) {
   try {
-    // Vercel gives us req.method and req.body (if JSON)
-    if (req.method !== "POST") {
-      // Helpful when you open /api/ai-pdf-template in the browser.
-      res.statusCode = 200;
-      res.setHeader("Content-Type", "application/json");
-      res.end(
-        JSON.stringify({
-          ok: true,
-          message: "ai-pdf-template function is alive. Use POST from the app.",
-          method: req.method,
-          hasOpenAiKey: !!OPENAI_API_KEY,
-        })
-      );
-      return;
-    }
-
-    if (!OPENAI_API_KEY) {
-      res.statusCode = 500;
-      res.setHeader("Content-Type", "application/json");
-      res.end(
-        JSON.stringify({
-          error: "OPENAI_API_KEY is not set in the environment.",
-        })
-      );
-      return;
-    }
-
     const body = req.body || {};
     const {
       text,
-      maxSections = 12,
-      maxQuestionsPerSection = 30,
+      maxSections = 20,
+      maxQuestionsPerSection = 40,
     } = body;
 
     if (!text || typeof text !== "string") {
-      res.statusCode = 400;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: "Missing 'text' in request body." }));
+      res.status(400).json({ error: "Missing 'text' in request body" });
       return;
     }
 
-    const systemPrompt = `
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+
+    // ---- NEW: split the text into chunks and call OpenAI per chunk ----
+    // This helps large PDFs: we don't force the model to handle everything at once.
+    const MAX_CHARS_PER_CHUNK = 18000; // safe for tokens
+    const chunks: string[] = [];
+    for (let i = 0; i < text.length; i += MAX_CHARS_PER_CHUNK) {
+      chunks.push(text.slice(i, i + MAX_CHARS_PER_CHUNK));
+    }
+
+    const allSections: any[] = [];
+    let combinedName = "";
+    let combinedDescription = "";
+
+    const baseSystemPrompt = `
 You convert checklist PDFs into JSON templates for an inspections app called AuditKing.
+
+You will receive PARTS of a larger checklist text. For each part:
+
+- Extract sections and questions *only from this part*.
+- Do NOT worry about other parts; each call is independent.
+- Return ONLY sections/questions that clearly exist in the given text.
+- Do NOT add made-up questions.
 
 Return ONLY a JSON object with this exact structure (no extra properties):
 
 {
-  "name": string,
-  "description": string,
+  "name": string,                     // short template name
+  "description": string,              // short description
   "sections": [
     {
       "title": string,
       "questions": [
         {
-          "label": string,
+          "label": string,            // the question text
           "type": "yes_no_na" | "good_fair_poor" | "multiple_choice" | "text",
-          "options": string[],
+          "options": string[],        // for multiple_choice only, otherwise []
           "allowNotes": boolean,
           "allowPhoto": boolean,
           "required": boolean
@@ -83,88 +89,92 @@ Return ONLY a JSON object with this exact structure (no extra properties):
 }
 
 Rules:
-- Use at most maxSections sections.
-- Use at most maxQuestionsPerSection questions per section.
+- Use at most ${maxSections} sections for THIS part.
+- Use at most ${maxQuestionsPerSection} questions per section for THIS part.
 - Prefer "yes_no_na" for simple pass/fail items.
 - Use "good_fair_poor" for quality / condition checks.
 - Use "multiple_choice" only when the text clearly lists discrete options.
 - Otherwise use "text".
 - Make clear, short question labels.
 - Do NOT include any commentary; just the JSON object.
-`.trim();
+`;
 
-    const userPrompt = {
-      text,
-      maxSections,
-      maxQuestionsPerSection,
-    };
+    for (let idx = 0; idx < chunks.length; idx++) {
+      const partText = chunks[idx];
+      const partNumber = idx + 1;
+      const totalParts = chunks.length;
 
-    // Call OpenAI HTTP API directly
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
+      const userPrompt = {
+        partNumber,
+        totalParts,
+        text: partText,
+      };
+
+      const completion = await openai.chat.completions.create({
         model: "gpt-4.1-mini",
         messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: JSON.stringify(userPrompt) },
+          {
+            role: "system",
+            content:
+              baseSystemPrompt +
+              (totalParts > 1
+                ? `\nYou are processing part ${partNumber} of ${totalParts}.\n`
+                : ""),
+          },
+          {
+            role: "user",
+            content: JSON.stringify(userPrompt),
+          },
         ],
+        // Force pure JSON output
         response_format: { type: "json_object" },
         temperature: 0.2,
-      }),
+      });
+
+      const content = completion.choices[0]?.message?.content || "{}";
+
+      let parsed: any;
+      try {
+        parsed = JSON.parse(content);
+      } catch (e) {
+        console.error("JSON parse error from OpenAI for part", partNumber, e, content);
+        // Skip this chunk but continue with others instead of failing everything
+        continue;
+      }
+
+      // For the first chunk, use the model's name/description.
+      // For later chunks, we only care about sections.
+      if (idx === 0) {
+        combinedName =
+          parsed.name ||
+          "Imported template from PDF";
+        combinedDescription =
+          parsed.description ||
+          "Template imported from PDF using AI.";
+      }
+
+      if (Array.isArray(parsed.sections)) {
+        allSections.push(...parsed.sections);
+      }
+    }
+
+    if (allSections.length === 0) {
+      res.status(500).json({
+        error:
+          "AI could not extract any sections/questions from the PDF text.",
+      });
+      return;
+    }
+
+    res.status(200).json({
+      name: combinedName,
+      description: combinedDescription,
+      sections: allSections,
     });
-
-    const data = await resp.json().catch(() => ({}));
-
-    if (!resp.ok) {
-      const msg =
-        data?.error?.message ||
-        `OpenAI error: ${resp.status} ${resp.statusText}`;
-      console.error("OpenAI API error:", msg, data);
-      res.statusCode = 500;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: msg }));
-      return;
-    }
-
-    const content = data.choices?.[0]?.message?.content || "{}";
-
-    let parsed;
-    try {
-      parsed = JSON.parse(content);
-    } catch (e) {
-      console.error("JSON parse error from OpenAI:", e, content);
-      res.statusCode = 500;
-      res.setHeader("Content-Type", "application/json");
-      res.end(
-        JSON.stringify({
-          error: "Model returned invalid JSON.",
-        })
-      );
-      return;
-    }
-
-    if (!Array.isArray(parsed.sections)) {
-      parsed.sections = [];
-    }
-
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(parsed));
-  } catch (err) {
-    console.error("ai-pdf-template handler error:", err);
-    res.statusCode = 500;
-    res.setHeader("Content-Type", "application/json");
-    res.end(
-      JSON.stringify({
-        error: err && err.message ? err.message : "Unexpected server error",
-      })
-    );
+  } catch (err: any) {
+    console.error("ai-pdf-template error:", err);
+    res.status(500).json({
+      error: err?.message || "Unexpected server error",
+    });
   }
 }
-
-// CommonJS export so Node doesn't choke on "export default"
-module.exports = handler;
