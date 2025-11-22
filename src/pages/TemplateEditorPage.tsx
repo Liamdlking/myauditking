@@ -19,11 +19,6 @@ type TemplateQuestion = {
 type TemplateSection = {
   id: string;
   title: string;
-
-  // NEW: optional “page” metadata – backwards-compatible
-  page_title?: string | null;
-  page_break_before?: boolean;
-
   image_data_url?: string | null;
   questions: TemplateQuestion[];
 };
@@ -162,8 +157,6 @@ export default function TemplateEditorPage({ mode }: Props) {
             {
               id: randomId("sec"),
               title: "Section 1",
-              page_title: "Page 1",
-              page_break_before: false, // first section = first page
               image_data_url: null,
               questions: [
                 {
@@ -201,18 +194,24 @@ export default function TemplateEditorPage({ mode }: Props) {
     );
   };
 
-  const addSection = () => {
-    setSections((prev) => [
-      ...prev,
-      {
+  // Insert a new section at a specific index
+  const insertSectionAt = (index: number, initialTitle?: string) => {
+    setSections((prev) => {
+      const newSection: TemplateSection = {
         id: randomId("sec"),
-        title: `Section ${prev.length + 1}`,
-        page_title: `Page ${prev.length + 1}`,
-        page_break_before: prev.length > 0, // new page starting from section 2+
+        title: initialTitle || `Section ${index + 1}`,
         image_data_url: null,
         questions: [],
-      },
-    ]);
+      };
+      const next = [...prev];
+      next.splice(index, 0, newSection);
+      return next;
+    });
+  };
+
+  // Original "Add section" now just appends at the end
+  const addSection = () => {
+    insertSectionAt(sections.length);
   };
 
   const removeSection = (sectionId: string) => {
@@ -316,8 +315,6 @@ export default function TemplateEditorPage({ mode }: Props) {
     const cleanedSections: TemplateSection[] = sections.map((s) => ({
       ...s,
       title: s.title || "",
-      page_title: s.page_title ?? null,
-      page_break_before: !!s.page_break_before,
       questions: s.questions.map((q) => ({
         ...q,
         label: q.label || "",
@@ -398,7 +395,7 @@ export default function TemplateEditorPage({ mode }: Props) {
 
   if (notFound) {
     return (
-      <div className="max-w-5xl mx-auto py-6">
+      <div className="max-w-5xl mx_auto py-6">
         <div className="rounded-2xl border bg-white p-4 text-sm text-gray-600">
           Template not found.
         </div>
@@ -473,9 +470,7 @@ export default function TemplateEditorPage({ mode }: Props) {
                 </label>
                 <select
                   value={siteId || ""}
-                  onChange={(e) =>
-                    setSiteId(e.target.value || null)
-                  }
+                  onChange={(e) => setSiteId(e.target.value || null)}
                   className="border rounded-xl px-3 py-2 text-sm"
                 >
                   <option value="">All sites</option>
@@ -525,7 +520,7 @@ export default function TemplateEditorPage({ mode }: Props) {
               </p>
             )}
             <label className="inline-flex items-center gap-2 text-[11px] cursor-pointer">
-              <span className="px-2 py-1 border rounded-xl bg.White hover:bg-gray-50">
+              <span className="px-2 py-1 border rounded-xl bg-white hover:bg-gray-50">
                 {logoDataUrl ? "Change logo" : "Upload logo"}
               </span>
               <input
@@ -553,266 +548,248 @@ export default function TemplateEditorPage({ mode }: Props) {
             onClick={addSection}
             className="px-3 py-1.5 rounded-xl border text-xs hover:bg-gray-50"
           >
-            + Add section
+            + Add section at end
           </button>
         </div>
 
         {sections.length === 0 ? (
-          <div className="rounded-2xl border bg.White p-4 text-xs text-gray-600">
+          <div className="rounded-2xl border bg-white p-4 text-xs text-gray-600">
             No sections yet. Add one to start building your template.
           </div>
         ) : (
           <div className="space-y-3">
-            {sections.map((section) => (
-              <div
-                key={section.id}
-                className="rounded-2xl border bg.White p-4 space-y-3"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 space-y-3">
-                    <div>
-                      <label className="block text-[11px] text-gray-500 mb-1">
-                        Section title
-                      </label>
-                      <input
-                        value={section.title}
-                        onChange={(e) =>
-                          updateSection(section.id, {
-                            title: e.target.value,
-                          })
-                        }
-                        className="w-full border rounded-xl px-3 py-2 text-sm"
-                        placeholder="E.g. Housekeeping"
-                      />
-                    </div>
-
-                    {/* NEW: page settings */}
-                    <div className="grid md:grid-cols-2 gap-3">
+            {sections.map((section, idx) => (
+              <React.Fragment key={section.id}>
+                <div className="rounded-2xl border bg-white p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 space-y-2">
                       <div>
                         <label className="block text-[11px] text-gray-500 mb-1">
-                          Page title (optional)
+                          Section title
                         </label>
                         <input
-                          value={section.page_title ?? ""}
+                          value={section.title}
                           onChange={(e) =>
                             updateSection(section.id, {
-                              page_title: e.target.value || null,
+                              title: e.target.value,
                             })
                           }
                           className="w-full border rounded-xl px-3 py-2 text-sm"
-                          placeholder="E.g. Ground floor checks"
+                          placeholder="E.g. Housekeeping / Title row"
                         />
                       </div>
-                      <div className="flex items-center mt-5">
-                        <label className="inline-flex items-center gap-2 text-[11px]">
+                      <div className="flex items-center gap-3">
+                        {section.image_data_url && (
+                          <img
+                            src={section.image_data_url}
+                            alt={section.title}
+                            className="h-10 w-10 rounded-md object-cover border bg-gray-50"
+                          />
+                        )}
+                        <label className="inline-flex items-center gap-2 text-[11px] cursor-pointer">
+                          <span className="px-2 py-1 border rounded-xl bg-white hover:bg-gray-50">
+                            {section.image_data_url
+                              ? "Change header image"
+                              : "Upload header image"}
+                          </span>
                           <input
-                            type="checkbox"
-                            checked={!!section.page_break_before}
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
                             onChange={(e) =>
-                              updateSection(section.id, {
-                                page_break_before: e.target.checked,
-                              })
+                              handleSectionImage(
+                                section.id,
+                                e.target.files
+                                  ? e.target.files[0]
+                                  : null
+                              )
                             }
                           />
-                          <span>
-                            Start a new PDF page before this section
-                          </span>
                         </label>
                       </div>
                     </div>
-
-                    <div className="flex items-center gap-3">
-                      {section.image_data_url && (
-                        <img
-                          src={section.image_data_url}
-                          alt={section.title}
-                          className="h-10 w-10 rounded-md object-cover border bg-gray-50"
-                        />
-                      )}
-                      <label className="inline-flex items-center gap-2 text-[11px] cursor-pointer">
-                        <span className="px-2 py-1 border rounded-xl bg.White hover:bg-gray-50">
-                          {section.image_data_url
-                            ? "Change header image"
-                            : "Upload header image"}
-                        </span>
-                        <input
-                          type="file"
-                          accept="image/*"
-                          className="hidden"
-                          onChange={(e) =>
-                            handleSectionImage(
-                              section.id,
-                              e.target.files
-                                ? e.target.files[0]
-                                : null
-                            )
-                          }
-                        />
-                      </label>
-                    </div>
+                    <button
+                      onClick={() => removeSection(section.id)}
+                      className="text-[11px] text-rose-600 hover:underline"
+                    >
+                      Remove section
+                    </button>
                   </div>
-                  <button
-                    onClick={() => removeSection(section.id)}
-                    className="text-[11px] text-rose-600 hover:underline"
-                  >
-                    Remove section
-                  </button>
-                </div>
 
-                <div className="flex flex-wrap gap-2 text-[11px]">
-                  <span className="text-gray-500">Add question:</span>
-                  <button
-                    onClick={() => addQuestion(section.id, "yes_no_na")}
-                    className="px-2 py-0.5 border rounded-xl hover:bg-gray-50"
-                  >
-                    Yes / No / N/A
-                  </button>
-                  <button
-                    onClick={() =>
-                      addQuestion(section.id, "good_fair_poor")
-                    }
-                    className="px-2 py-0.5 border rounded-xl hover:bg-gray-50"
-                  >
-                    Good / Fair / Poor
-                  </button>
-                  <button
-                    onClick={() =>
-                      addQuestion(section.id, "multiple_choice")
-                    }
-                    className="px-2 py-0.5 border rounded-xl hover:bg-gray-50"
-                  >
-                    Multiple choice
-                  </button>
-                  <button
-                    onClick={() => addQuestion(section.id, "text")}
-                    className="px-2 py-0.5 border rounded-xl hover:bg-gray-50"
-                  >
-                    Text only
-                  </button>
-                </div>
+                  <div className="flex flex-wrap gap-2 text-[11px]">
+                    <span className="text-gray-500">Add question:</span>
+                    <button
+                      onClick={() => addQuestion(section.id, "yes_no_na")}
+                      className="px-2 py-0.5 border rounded-xl hover:bg-gray-50"
+                    >
+                      Yes / No / N/A
+                    </button>
+                    <button
+                      onClick={() =>
+                        addQuestion(section.id, "good_fair_poor")
+                      }
+                      className="px-2 py-0.5 border rounded-xl hover:bg-gray-50"
+                    >
+                      Good / Fair / Poor
+                    </button>
+                    <button
+                      onClick={() =>
+                        addQuestion(section.id, "multiple_choice")
+                      }
+                      className="px-2 py-0.5 border rounded-xl hover:bg-gray-50"
+                    >
+                      Multiple choice
+                    </button>
+                    <button
+                      onClick={() => addQuestion(section.id, "text")}
+                      className="px-2 py-0.5 border rounded-xl hover:bg-gray-50"
+                    >
+                      Text only
+                    </button>
+                  </div>
 
-                <div className="space-y-2">
-                  {section.questions.length === 0 ? (
-                    <div className="border rounded-xl bg-gray-50 p-3 text-[11px] text-gray-500">
-                      No questions in this section yet.
-                    </div>
-                  ) : (
-                    section.questions.map((q) => (
-                      <div
-                        key={q.id}
-                        className="border rounded-xl bg-gray-50 p-3 space-y-2 text-xs"
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 space-y-1">
-                            <input
-                              value={q.label}
-                              onChange={(e) =>
-                                updateQuestion(section.id, q.id, {
-                                  label: e.target.value,
-                                })
-                              }
-                              className="w-full border rounded-xl px-2 py-1 text-xs"
-                              placeholder="Question text…"
-                            />
-                            <div className="flex flex-wrap gap-2 items-center">
-                              <select
-                                value={q.type}
+                  <div className="space-y-2">
+                    {section.questions.length === 0 ? (
+                      <div className="border rounded-xl bg-gray-50 p-3 text-[11px] text-gray-500">
+                        No questions in this section yet. You can leave it
+                        empty if you just want a title/header.
+                      </div>
+                    ) : (
+                      section.questions.map((q) => (
+                        <div
+                          key={q.id}
+                          className="border rounded-xl bg-gray-50 p-3 space-y-2 text-xs"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex-1 space-y-1">
+                              <input
+                                value={q.label}
                                 onChange={(e) =>
                                   updateQuestion(section.id, q.id, {
-                                    type: e.target
-                                      .value as QuestionType,
+                                    label: e.target.value,
                                   })
                                 }
-                                className="border rounded-xl px-2 py-1 text-[11px]"
-                              >
-                                <option value="yes_no_na">
-                                  Yes / No / N/A
-                                </option>
-                                <option value="good_fair_poor">
-                                  Good / Fair / Poor
-                                </option>
-                                <option value="multiple_choice">
-                                  Multiple choice
-                                </option>
-                                <option value="text">
-                                  Text only
-                                </option>
-                              </select>
-                              <label className="inline-flex items-center gap-1 text-[11px]">
-                                <input
-                                  type="checkbox"
-                                  checked={q.required}
+                                className="w-full border rounded-xl px-2 py-1 text-xs"
+                                placeholder="Question text…"
+                              />
+                              <div className="flex flex-wrap gap-2 items-center">
+                                <select
+                                  value={q.type}
                                   onChange={(e) =>
                                     updateQuestion(section.id, q.id, {
-                                      required: e.target.checked,
+                                      type: e.target
+                                        .value as QuestionType,
                                     })
                                   }
-                                />
-                                <span>Required</span>
-                              </label>
-                              <label className="inline-flex items-center gap-1 text-[11px]">
-                                <input
-                                  type="checkbox"
-                                  checked={q.allowNotes}
-                                  onChange={(e) =>
-                                    updateQuestion(section.id, q.id, {
-                                      allowNotes: e.target.checked,
-                                    })
-                                  }
-                                />
-                                <span>Notes</span>
-                              </label>
-                              <label className="inline-flex items-center gap-1 text-[11px]">
-                                <input
-                                  type="checkbox"
-                                  checked={q.allowPhoto}
-                                  onChange={(e) =>
-                                    updateQuestion(section.id, q.id, {
-                                      allowPhoto: e.target.checked,
-                                    })
-                                  }
-                                />
-                                <span>Photos</span>
-                              </label>
+                                  className="border rounded-xl px-2 py-1 text-[11px]"
+                                >
+                                  <option value="yes_no_na">
+                                    Yes / No / N/A
+                                  </option>
+                                  <option value="good_fair_poor">
+                                    Good / Fair / Poor
+                                  </option>
+                                  <option value="multiple_choice">
+                                    Multiple choice
+                                  </option>
+                                  <option value="text">
+                                    Text only
+                                  </option>
+                                </select>
+                                <label className="inline-flex items-center gap-1 text-[11px]">
+                                  <input
+                                    type="checkbox"
+                                    checked={q.required}
+                                    onChange={(e) =>
+                                      updateQuestion(section.id, q.id, {
+                                        required: e.target.checked,
+                                      })
+                                    }
+                                  />
+                                  <span>Required</span>
+                                </label>
+                                <label className="inline-flex items-center gap-1 text-[11px]">
+                                  <input
+                                    type="checkbox"
+                                    checked={q.allowNotes}
+                                    onChange={(e) =>
+                                      updateQuestion(section.id, q.id, {
+                                        allowNotes: e.target.checked,
+                                      })
+                                    }
+                                  />
+                                  <span>Notes</span>
+                                </label>
+                                <label className="inline-flex items-center gap-1 text-[11px]">
+                                  <input
+                                    type="checkbox"
+                                    checked={q.allowPhoto}
+                                    onChange={(e) =>
+                                      updateQuestion(section.id, q.id, {
+                                        allowPhoto: e.target.checked,
+                                      })
+                                    }
+                                  />
+                                  <span>Photos</span>
+                                </label>
+                              </div>
                             </div>
+                            <button
+                              onClick={() =>
+                                removeQuestion(section.id, q.id)
+                              }
+                              className="text-[11px] text-rose-600 hover:underline"
+                            >
+                              Remove
+                            </button>
                           </div>
-                          <button
-                            onClick={() =>
-                              removeQuestion(section.id, q.id)
-                            }
-                            className="text-[11px] text-rose-600 hover:underline"
-                          >
-                            Remove
-                          </button>
-                        </div>
 
-                        {q.type === "multiple_choice" && (
-                          <div>
-                            <label className="block text-[11px] text-gray-500 mb-1">
-                              Choices (comma-separated)
-                            </label>
-                            <input
-                              value={(q.options || []).join(", ")}
-                              onChange={(e) => {
-                                const text = e.target.value;
-                                const arr = text
-                                  .split(",")
-                                  .map((s) => s.trim())
-                                  .filter(Boolean);
-                                updateQuestion(section.id, q.id, {
-                                  options: arr,
-                                });
-                              }}
-                              className="w-full border rounded-xl px-2 py-1 text-xs"
-                              placeholder="E.g. Option A, Option B, Option C"
-                            />
-                          </div>
-                        )}
-                      </div>
-                    ))
-                  )}
+                          {q.type === "multiple_choice" && (
+                            <div>
+                              <label className="block text-[11px] text-gray-500 mb-1">
+                                Choices (comma-separated)
+                              </label>
+                              <input
+                                value={(q.options || []).join(", ")}
+                                onChange={(e) => {
+                                  const text = e.target.value;
+                                  const arr = text
+                                    .split(",")
+                                    .map((s) => s.trim())
+                                    .filter(Boolean);
+                                  updateQuestion(section.id, q.id, {
+                                    options: arr,
+                                  });
+                                }}
+                                className="w-full border rounded-xl px-2 py-1 text-xs"
+                                placeholder="E.g. Option A, Option B, Option C"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
-              </div>
+
+                {/* Insert controls between sections */}
+                <div className="flex justify-center gap-2 text-[11px]">
+                  <button
+                    onClick={() =>
+                      insertSectionAt(idx + 1, "Title")
+                    }
+                    className="px-3 py-1 rounded-xl border bg-white hover:bg-gray-50"
+                  >
+                    + Add title here
+                  </button>
+                  <button
+                    onClick={() => insertSectionAt(idx + 1)}
+                    className="px-3 py-1 rounded-xl border bg-white hover:bg-gray-50"
+                  >
+                    + Add section here
+                  </button>
+                </div>
+              </React.Fragment>
             ))}
           </div>
         )}
