@@ -87,7 +87,8 @@ Rules:
     };
 
     const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
+      // 👇 IMPORTANT: use gpt-4o-mini here
+      model: "gpt-4o-mini",
       messages: [
         { role: "system", content: systemPrompt },
         {
