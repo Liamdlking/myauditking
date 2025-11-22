@@ -1,124 +1,13 @@
 // api/ai-pdf-template.js
-// CommonJS version for Vercel Node runtime
+// Pure OpenAI JSON conversion, CommonJS for Vercel Node runtime
 
 const OpenAI = require("openai");
 
 /**
- * Helper: count total questions in sections
- */
-function countQuestions(sections) {
-  return sections.reduce(
-    (acc, s) => acc + (s.questions ? s.questions.length : 0),
-    0
-  );
-}
-
-/**
- * Rule-based parser for STOMPERS-style checklists:
- * - Uses "Area = X" as sections
- * - Uses "Check ..." lines as questions
- * - Most questions end with "Good Fair Poor N/A" -> good_fair_poor
- */
-function parseChecklistFromText(rawText, maxSections = 50, maxQuestionsPerSection = 100) {
-  if (!rawText || typeof rawText !== "string") {
-    return null;
-  }
-
-  const lines = rawText
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-
-  const sections = [];
-  let currentSection = null;
-
-  const startSection = (title) => {
-    if (currentSection && currentSection.questions.length > 0) {
-      sections.push(currentSection);
-    }
-    currentSection = {
-      title: title || "Section",
-      questions: [],
-    };
-  };
-
-  for (let line of lines) {
-    // Ignore "RESPONSE" and "NEW TITLE - ..." helper lines
-    if (/^RESPONSE\b/i.test(line)) continue;
-    if (/^NEW TITLE\b/i.test(line)) continue;
-
-    // Area = X -> new section
-    const areaMatch = line.match(/^Area\s*=\s*(.+)$/i);
-    if (areaMatch) {
-      const areaTitle = areaMatch[1].trim();
-      startSection(areaTitle);
-      continue;
-    }
-
-    // "Check ..." lines -> questions
-    if (/^(Check|Chcek)/i.test(line)) {
-      // Strip common rating tails like "Good Fair Poor N/A"
-      line = line.replace(/\bGood\s+Fair\s+Poor\s+N\/A\b.*$/i, "").trim();
-
-      // Sometimes it might still end with "Good Fair Poor N/A" without N/A spacing variations,
-      // so defensively remove again.
-      line = line.replace(/\bGood\s+Fair\s+Poor\b.*$/i, "").trim();
-
-      if (!line) continue;
-
-      let label = line;
-
-      // Ensure we have a section to put it in
-      if (!currentSection) {
-        startSection("General checks");
-      }
-
-      currentSection.questions.push({
-        label,
-        type: "good_fair_poor",
-        options: [],
-        allowNotes: true,
-        allowPhoto: true,
-        required: true,
-      });
-    }
-  }
-
-  // Flush last section
-  if (currentSection && currentSection.questions.length > 0) {
-    sections.push(currentSection);
-  }
-
-  // Trim by limits
-  const trimmedSections = sections.slice(0, maxSections).map((sec) => {
-    const qs = (sec.questions || []).slice(0, maxQuestionsPerSection);
-    return { ...sec, questions: qs };
-  });
-
-  const totalQuestions = countQuestions(trimmedSections);
-
-  // If we didn't find anything meaningful, return null so we can fall back to AI
-  if (!trimmedSections.length || totalQuestions === 0) {
-    return null;
-  }
-
-  // Basic name / description
-  const name = "Imported checklist";
-  const description =
-    "Template imported from PDF checklist using rule-based parser.";
-
-  return {
-    name,
-    description,
-    sections: trimmedSections,
-  };
-}
-
-/**
- * Main handler – tries rule-based parsing first,
- * then falls back to OpenAI JSON output.
+ * Vercel serverless function to turn extracted PDF text
+ * into an AuditKing template using OpenAI only.
  *
- * Expected POST body:
+ * It expects a POST with JSON:
  * {
  *   text: string;
  *   maxSections?: number;
@@ -126,13 +15,13 @@ function parseChecklistFromText(rawText, maxSections = 50, maxQuestionsPerSectio
  * }
  */
 async function handler(req, res) {
-  // Method check
+  // Only allow POST
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
     return;
   }
 
-  // Ensure body is an object
+  // Body can arrive as string or object depending on config
   let body = req.body;
   if (typeof body === "string") {
     try {
@@ -145,8 +34,8 @@ async function handler(req, res) {
 
   const {
     text,
-    maxSections = 50,
-    maxQuestionsPerSection = 100,
+    maxSections = 12,
+    maxQuestionsPerSection = 30,
   } = body || {};
 
   if (!text || typeof text !== "string") {
@@ -154,29 +43,6 @@ async function handler(req, res) {
     return;
   }
 
-  // 1) Try rule-based parser first (for STOMPERS-style checklists)
-  try {
-    const ruleResult = parseChecklistFromText(
-      text,
-      maxSections,
-      maxQuestionsPerSection
-    );
-
-    if (ruleResult) {
-      // If we got a decent number of questions, just return this
-      const totalQuestions = countQuestions(ruleResult.sections);
-      if (totalQuestions >= 10) {
-        res.status(200).json(ruleResult);
-        return;
-      }
-      // If it's tiny, we still fall through to AI below
-    }
-  } catch (e) {
-    console.error("Rule-based parser error:", e);
-    // We don't fail here; we just fall back to AI
-  }
-
-  // 2) Fallback to OpenAI if rule-based parser not sufficient
   if (!process.env.OPENAI_API_KEY) {
     res
       .status(500)
@@ -195,16 +61,16 @@ You convert checklist PDFs into JSON templates for an inspections app called Aud
 Return ONLY a JSON object with this exact structure (no extra properties):
 
 {
-  "name": string,
-  "description": string,
+  "name": string,                     // short template name
+  "description": string,              // short description
   "sections": [
     {
       "title": string,
       "questions": [
         {
-          "label": string,
+          "label": string,            // the question text
           "type": "yes_no_na" | "good_fair_poor" | "multiple_choice" | "text",
-          "options": string[],
+          "options": string[],        // for multiple_choice only, otherwise []
           "allowNotes": boolean,
           "allowPhoto": boolean,
           "required": boolean
@@ -225,8 +91,12 @@ Rules:
 - Do NOT include any commentary; just the JSON object.
 `;
 
+    // If you later increase what the frontend sends, you can also
+    // truncate here defensively (for now it's already limited in the UI).
+    const truncatedText = text; // or text.slice(0, 50000);
+
     const userPrompt = {
-      text,
+      text: truncatedText,
       maxSections,
       maxQuestionsPerSection,
     };
@@ -240,6 +110,7 @@ Rules:
           content: JSON.stringify(userPrompt),
         },
       ],
+      // Force pure JSON output
       response_format: { type: "json_object" },
       temperature: 0.2,
     });
