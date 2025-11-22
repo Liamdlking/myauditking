@@ -1,103 +1,110 @@
 // api/ai-pdf-template.js
-// CommonJS version so Vercel's Node runtime is happy
+// Hybrid PDF → template converter:
+// 1) Rule-based for "Area = ... / Check ..." style PDFs
+// 2) Fallback to OpenAI for everything else (if OPENAI_API_KEY is set)
 
-const OpenAI = require("openai");
+let OpenAI = null;
+try {
+  // Only require OpenAI if available
+  OpenAI = require("openai");
+} catch (e) {
+  // It's okay if it's not installed in some environments
+  console.warn("openai package not found, AI fallback will be disabled.");
+}
 
-/**
- * Vercel serverless function to turn extracted PDF text
- * into an AuditKing template using OpenAI.
- *
- * Expects a POST with JSON:
- * {
- *   text: string;
- *   maxSections?: number;
- *   maxQuestionsPerSection?: number;
- * }
- */
-module.exports = async function handler(req, res) {
-  // Only allow POST
-  if (req.method !== "POST") {
-    res.statusCode = 405;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ error: "Method not allowed" }));
-    return;
+// --------- Rule-based converter for "Area = ... / Check ..." style ---------
+
+function buildSectionsFromText(rawText) {
+  const lines = (rawText || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  const sections = [];
+  let currentSection = null;
+
+  const isNoiseLine = (line) => {
+    const upper = line.toUpperCase();
+    if (upper === "GOOD FAIR POOR N/A") return true;
+    if (upper === "RESPONSE") return true;
+    if (upper.startsWith("NEW TITLE -")) return true;
+    return false;
+  };
+
+  for (const line of lines) {
+    // Start of a new area
+    if (/^AREA\s*=/i.test(line)) {
+      const title = line.replace(/^AREA\s*=/i, "").trim() || "Area";
+      currentSection = {
+        title,
+        questions: [],
+      };
+      sections.push(currentSection);
+      continue;
+    }
+
+    // Skip obvious scoring / layout noise
+    if (isNoiseLine(line)) {
+      continue;
+    }
+
+    // Everything else within an Area becomes a question
+    if (currentSection) {
+      currentSection.questions.push({
+        label: line,
+        type: "good_fair_poor", // matches the Good / Fair / Poor / N/A style
+        options: [],
+        allowNotes: true,
+        allowPhoto: true,
+        required: true,
+      });
+    }
   }
 
-  // Check API key
+  // Remove any sections with no questions
+  return sections.filter((sec) => sec.questions.length > 0);
+}
+
+function countAreaMarkers(text) {
+  if (!text) return 0;
+  const matches = text.match(/Area\s*=/gi);
+  return matches ? matches.length : 0;
+}
+
+// --------- OpenAI fallback ---------
+
+async function generateWithOpenAI(text, maxSections, maxQuestionsPerSection) {
   if (!process.env.OPENAI_API_KEY) {
-    res.statusCode = 500;
-    res.setHeader("Content-Type", "application/json");
-    res.end(
-      JSON.stringify({
-        error: "OPENAI_API_KEY is not set in environment",
-      })
+    throw new Error(
+      "OPENAI_API_KEY is not set in environment and rule-based parser did not match."
     );
-    return;
+  }
+  if (!OpenAI) {
+    throw new Error(
+      "openai package is not installed but OPENAI_API_KEY is set."
+    );
   }
 
-  try {
-    // Parse body safely (Vercel may give us an object or a string)
-    let body = req.body;
-    if (typeof body === "string") {
-      try {
-        body = JSON.parse(body);
-      } catch (e) {
-        body = {};
-      }
-    }
-    body = body || {};
+  const client = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+  });
 
-    const {
-      text,
-      maxSections = 20,
-      maxQuestionsPerSection = 40,
-    } = body;
-
-    if (!text || typeof text !== "string") {
-      res.statusCode = 400;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: "Missing 'text' in request body" }));
-      return;
-    }
-
-    const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
-
-    // -------- Chunking logic so large PDFs don't get cut off --------
-    const MAX_CHARS_PER_CHUNK = 18000; // safe for tokens
-    const chunks = [];
-    for (let i = 0; i < text.length; i += MAX_CHARS_PER_CHUNK) {
-      chunks.push(text.slice(i, i + MAX_CHARS_PER_CHUNK));
-    }
-
-    const allSections = [];
-    let combinedName = "";
-    let combinedDescription = "";
-
-    const baseSystemPrompt = `
+  const systemPrompt = `
 You convert checklist PDFs into JSON templates for an inspections app called AuditKing.
-
-You will receive PARTS of a larger checklist text. For each part:
-
-- Extract sections and questions *only from this part*.
-- Do NOT worry about other parts; each call is independent.
-- Return ONLY sections/questions that clearly exist in the given text.
-- Do NOT add made-up questions.
 
 Return ONLY a JSON object with this exact structure (no extra properties):
 
 {
-  "name": string,                     // short template name
-  "description": string,              // short description
+  "name": string,
+  "description": string,
   "sections": [
     {
       "title": string,
       "questions": [
         {
-          "label": string,            // the question text
+          "label": string,
           "type": "yes_no_na" | "good_fair_poor" | "multiple_choice" | "text",
-          "options": string[],        // for multiple_choice only, otherwise []
+          "options": string[],
           "allowNotes": boolean,
           "allowPhoto": boolean,
           "required": boolean
@@ -108,8 +115,8 @@ Return ONLY a JSON object with this exact structure (no extra properties):
 }
 
 Rules:
-- Use at most ${maxSections} sections for THIS part.
-- Use at most ${maxQuestionsPerSection} questions per section for THIS part.
+- Use at most maxSections sections.
+- Use at most maxQuestionsPerSection questions per section.
 - Prefer "yes_no_na" for simple pass/fail items.
 - Use "good_fair_poor" for quality / condition checks.
 - Use "multiple_choice" only when the text clearly lists discrete options.
@@ -118,95 +125,96 @@ Rules:
 - Do NOT include any commentary; just the JSON object.
 `;
 
-    for (let idx = 0; idx < chunks.length; idx++) {
-      const partText = chunks[idx];
-      const partNumber = idx + 1;
-      const totalParts = chunks.length;
+  const userPrompt = {
+    text,
+    maxSections,
+    maxQuestionsPerSection,
+  };
 
-      const userPrompt = {
-        partNumber,
-        totalParts,
-        text: partText,
-      };
+  const completion = await client.chat.completions.create({
+    model: "gpt-4.1-mini",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: JSON.stringify(userPrompt) },
+    ],
+    response_format: { type: "json_object" },
+    temperature: 0.2,
+  });
 
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4.1-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              baseSystemPrompt +
-              (totalParts > 1
-                ? `\nYou are processing part ${partNumber} of ${totalParts}.\n`
-                : ""),
-          },
-          {
-            role: "user",
-            content: JSON.stringify(userPrompt),
-          },
-        ],
-        response_format: { type: "json_object" },
-        temperature: 0.2,
-      });
+  const content = completion.choices[0]?.message?.content || "{}";
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch (e) {
+    console.error("JSON parse error from OpenAI:", e, content);
+    throw new Error("Model returned invalid JSON");
+  }
 
-      const content = completion.choices[0]?.message?.content || "{}";
+  if (!Array.isArray(parsed.sections)) {
+    parsed.sections = [];
+  }
 
-      let parsed;
-      try {
-        parsed = JSON.parse(content);
-      } catch (e) {
-        console.error(
-          "JSON parse error from OpenAI for part",
-          partNumber,
-          e,
-          content
-        );
-        // Skip this chunk but continue with others instead of failing everything
-        continue;
-      }
+  return parsed;
+}
 
-      if (idx === 0) {
-        combinedName =
-          parsed.name || "Imported template from PDF";
-        combinedDescription =
-          parsed.description ||
-          "Template imported from PDF using AI.";
-      }
+// --------- Main handler ---------
 
-      if (Array.isArray(parsed.sections)) {
-        allSections.push(...parsed.sections);
-      }
-    }
+async function handler(req, res) {
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "Method not allowed" });
+    return;
+  }
 
-    if (allSections.length === 0) {
-      res.statusCode = 500;
-      res.setHeader("Content-Type", "application/json");
-      res.end(
-        JSON.stringify({
-          error:
-            "AI could not extract any sections/questions from the PDF text.",
-        })
-      );
+  try {
+    const body = req.body || {};
+    const {
+      text,
+      maxSections = 12,
+      maxQuestionsPerSection = 30,
+    } = body;
+
+    if (!text || typeof text !== "string") {
+      res.status(400).json({ error: "Missing 'text' in request body" });
       return;
     }
 
-    const result = {
-      name: combinedName,
-      description: combinedDescription,
-      sections: allSections,
-    };
+    // 1) Try rule-based STOMPERS-style converter first
+    const areaCount = countAreaMarkers(text);
+    let sections = [];
 
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(result));
-  } catch (err) {
-    console.error("ai-pdf-template error:", err);
-    res.statusCode = 500;
-    res.setHeader("Content-Type", "application/json");
-    res.end(
-      JSON.stringify({
-        error: err && err.message ? err.message : "Unexpected server error",
-      })
+    if (areaCount >= 3) {
+      sections = buildSectionsFromText(text);
+    }
+
+    const totalQuestions =
+      sections.reduce((acc, s) => acc + (s.questions?.length || 0), 0) || 0;
+
+    if (sections.length > 0 && totalQuestions >= 5) {
+      // Looks like a good rule-based result – return it
+      const result = {
+        name: "Imported checklist",
+        description:
+          "Template imported from PDF using rule-based converter (Area = ... / Check ...).",
+        sections,
+      };
+      res.status(200).json(result);
+      return;
+    }
+
+    // 2) Fallback to OpenAI for anything else / non-matching PDFs
+    const aiResult = await generateWithOpenAI(
+      text,
+      maxSections,
+      maxQuestionsPerSection
     );
+    res.status(200).json(aiResult);
+  } catch (err) {
+    console.error("ai-pdf-template hybrid error:", err);
+    res.status(500).json({
+      error: err && err.message ? err.message : "Unexpected server error",
+    });
   }
-};
+}
+
+// CommonJS export for Vercel
+module.exports = handler;
