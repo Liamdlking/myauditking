@@ -53,7 +53,8 @@ function randomId(prefix: string) {
 // Extract raw text from a PDF file in the browser
 async function extractTextFromPdf(file: File): Promise<string> {
   const arrayBuffer = await file.arrayBuffer();
-  const pdf = await (pdfjsLib as any).getDocument({ data: arrayBuffer }).promise;
+  const pdf = await (pdfjsLib as any).getDocument({ data: arrayBuffer })
+    .promise;
 
   let fullText = "";
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
@@ -64,6 +65,11 @@ async function extractTextFromPdf(file: File): Promise<string> {
   }
   return fullText;
 }
+
+// --- NEW: tune how much we send to the AI ---
+const AI_MAX_TEXT_CHARS = 60000; // was 20000
+const AI_MAX_SECTIONS = 30; // was 12
+const AI_MAX_QUESTIONS_PER_SECTION = 80; // was 30
 
 const ImportTemplateFromPdfModal: React.FC<ImportTemplateFromPdfModalProps> = ({
   open,
@@ -82,7 +88,9 @@ const ImportTemplateFromPdfModal: React.FC<ImportTemplateFromPdfModalProps> = ({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
 
-  const [definition, setDefinition] = useState<TemplateDefinition | null>(null);
+  const [definition, setDefinition] = useState<TemplateDefinition | null>(
+    null
+  );
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -163,9 +171,10 @@ const ImportTemplateFromPdfModal: React.FC<ImportTemplateFromPdfModalProps> = ({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          text: rawText.slice(0, 20000), // limit size
-          maxSections: 12,
-          maxQuestionsPerSection: 30,
+          // send more of the PDF text to the API
+          text: rawText.slice(0, AI_MAX_TEXT_CHARS),
+          maxSections: AI_MAX_SECTIONS,
+          maxQuestionsPerSection: AI_MAX_QUESTIONS_PER_SECTION,
         }),
       });
 
@@ -179,32 +188,39 @@ const ImportTemplateFromPdfModal: React.FC<ImportTemplateFromPdfModalProps> = ({
       // {
       //   name: string;
       //   description?: string;
-      //   sections: { title: string; questions: { label, type, options?, allowNotes?, allowPhoto?, required? }[] }[]
+      //   sections: {
+      //     title: string;
+      //     questions: {
+      //       label, type, options?, allowNotes?, allowPhoto?, required?
+      //     }[]
+      //   }[]
       // }
 
-      const tplName = ai.name || (file?.name?.replace(/\.pdf$/i, "") ?? "Imported template");
+      const tplName =
+        ai.name ||
+        (file?.name?.replace(/\.pdf$/i, "") ?? "Imported template");
       const tplDesc =
-        ai.description ||
-        "Template imported from PDF using AI.";
+        ai.description || "Template imported from PDF using AI.";
 
-      const sections: TemplateSection[] = (ai.sections || []).map((sec: any) => ({
-        id: randomId("sec"),
-        title: sec.title || "Section",
-        image_data_url: null,
-        questions: (sec.questions || []).map((q: any) => ({
-          id: randomId("q"),
-          label: q.label || "Question",
-          type: (q.type ||
-            "yes_no_na") as QuestionType,
-          options: q.options || [],
-          allowNotes:
-            typeof q.allowNotes === "boolean" ? q.allowNotes : true,
-          allowPhoto:
-            typeof q.allowPhoto === "boolean" ? q.allowPhoto : true,
-          required:
-            typeof q.required === "boolean" ? q.required : true,
-        })),
-      }));
+      const sections: TemplateSection[] = (ai.sections || []).map(
+        (sec: any) => ({
+          id: randomId("sec"),
+          title: sec.title || "Section",
+          image_data_url: null,
+          questions: (sec.questions || []).map((q: any) => ({
+            id: randomId("q"),
+            label: q.label || "Question",
+            type: (q.type || "yes_no_na") as QuestionType,
+            options: q.options || [],
+            allowNotes:
+              typeof q.allowNotes === "boolean" ? q.allowNotes : true,
+            allowPhoto:
+              typeof q.allowPhoto === "boolean" ? q.allowPhoto : true,
+            required:
+              typeof q.required === "boolean" ? q.required : true,
+          })),
+        })
+      );
 
       setName(tplName);
       setDescription(tplDesc);
@@ -334,7 +350,9 @@ const ImportTemplateFromPdfModal: React.FC<ImportTemplateFromPdfModalProps> = ({
                 disabled={!rawText || extracting || aiGenerating}
                 className="w-full px-3 py-2 rounded-xl bg-purple-700 text-white text-xs hover:bg-purple-800 disabled:opacity-50"
               >
-                {aiGenerating ? "Generating template with AI…" : "Generate template with AI"}
+                {aiGenerating
+                  ? "Generating template with AI…"
+                  : "Generate template with AI"}
               </button>
               {definition && (
                 <p className="text-[11px] text-gray-500">
