@@ -40,6 +40,9 @@ type TemplateDefinition = {
   sections: TemplateSection[];
 };
 
+// ---------- CONFIG: increase how much PDF text we send to OpenAI ----------
+const MAX_TEXT_CHARS = 80000; // was 20000 – this should cover 10–15 pages of questions comfortably
+
 // Simple ID helper
 function randomId(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -53,8 +56,7 @@ function randomId(prefix: string) {
 // Extract raw text from a PDF file in the browser
 async function extractTextFromPdf(file: File): Promise<string> {
   const arrayBuffer = await file.arrayBuffer();
-  const pdf = await (pdfjsLib as any).getDocument({ data: arrayBuffer })
-    .promise;
+  const pdf = await (pdfjsLib as any).getDocument({ data: arrayBuffer }).promise;
 
   let fullText = "";
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
@@ -65,11 +67,6 @@ async function extractTextFromPdf(file: File): Promise<string> {
   }
   return fullText;
 }
-
-// --- NEW: tune how much we send to the AI ---
-const AI_MAX_TEXT_CHARS = 60000; // was 20000
-const AI_MAX_SECTIONS = 30; // was 12
-const AI_MAX_QUESTIONS_PER_SECTION = 80; // was 30
 
 const ImportTemplateFromPdfModal: React.FC<ImportTemplateFromPdfModalProps> = ({
   open,
@@ -88,9 +85,7 @@ const ImportTemplateFromPdfModal: React.FC<ImportTemplateFromPdfModalProps> = ({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
 
-  const [definition, setDefinition] = useState<TemplateDefinition | null>(
-    null
-  );
+  const [definition, setDefinition] = useState<TemplateDefinition | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -167,14 +162,19 @@ const ImportTemplateFromPdfModal: React.FC<ImportTemplateFromPdfModalProps> = ({
     setError(null);
     setAiGenerating(true);
     try {
+      // Truncate if necessary, but use a MUCH larger limit than before
+      const truncated = rawText.length > MAX_TEXT_CHARS;
+      const textToSend = truncated
+        ? rawText.slice(0, MAX_TEXT_CHARS)
+        : rawText;
+
       const res = await fetch("/api/ai-pdf-template", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          // send more of the PDF text to the API
-          text: rawText.slice(0, AI_MAX_TEXT_CHARS),
-          maxSections: AI_MAX_SECTIONS,
-          maxQuestionsPerSection: AI_MAX_QUESTIONS_PER_SECTION,
+          text: textToSend,
+          maxSections: 20,
+          maxQuestionsPerSection: 40,
         }),
       });
 
@@ -188,19 +188,17 @@ const ImportTemplateFromPdfModal: React.FC<ImportTemplateFromPdfModalProps> = ({
       // {
       //   name: string;
       //   description?: string;
-      //   sections: {
-      //     title: string;
-      //     questions: {
-      //       label, type, options?, allowNotes?, allowPhoto?, required?
-      //     }[]
-      //   }[]
+      //   sections: { title: string; questions: { label, type, options?, allowNotes?, allowPhoto?, required? }[] }[]
       // }
 
       const tplName =
         ai.name ||
         (file?.name?.replace(/\.pdf$/i, "") ?? "Imported template");
       const tplDesc =
-        ai.description || "Template imported from PDF using AI.";
+        ai.description ||
+        (truncated
+          ? "Template imported from a large PDF using AI (content truncated to fit)."
+          : "Template imported from PDF using AI.");
 
       const sections: TemplateSection[] = (ai.sections || []).map(
         (sec: any) => ({
@@ -265,6 +263,8 @@ const ImportTemplateFromPdfModal: React.FC<ImportTemplateFromPdfModalProps> = ({
 
   if (!open) return null;
 
+  const wordCount = rawText ? rawText.split(/\s+/).length : 0;
+  const truncated = rawText.length > MAX_TEXT_CHARS;
   const questionCount =
     definition?.sections.reduce(
       (acc, s) => acc + (s.questions?.length || 0),
@@ -318,8 +318,16 @@ const ImportTemplateFromPdfModal: React.FC<ImportTemplateFromPdfModalProps> = ({
               )}
               {rawText && !extracting && (
                 <p className="text-[11px] text-gray-400 mt-1">
-                  Extracted approximately {rawText.split(/\s+/).length} words
-                  from the PDF.
+                  Extracted about {wordCount} words from the PDF.
+                  {truncated && (
+                    <>
+                      {" "}
+                      <span className="text-amber-700">
+                        (Only the first {MAX_TEXT_CHARS.toLocaleString()}{" "}
+                        characters will be sent to AI.)
+                      </span>
+                    </>
+                  )}
                 </p>
               )}
             </div>
