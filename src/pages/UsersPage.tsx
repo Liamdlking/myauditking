@@ -14,7 +14,7 @@ type UserRow = {
   email: string | null;
   name: string | null;
   role: Role;
-  site_access: string[];
+  site_access: string[]; // empty array = no sites; admin uses null in DB
   is_banned: boolean;
 };
 
@@ -41,7 +41,7 @@ export default function UsersPage() {
   const [bulkResult, setBulkResult] = useState<string | null>(null);
 
   // --------------------------
-  // Helpers to load sites + users
+  // Load sites + users helpers
   // --------------------------
   const loadSites = async () => {
     const { data, error } = await supabase
@@ -71,6 +71,7 @@ export default function UsersPage() {
       email: p.email ?? null,
       name: p.name ?? null,
       role: (p.role as Role) || "inspector",
+      // if site_access is null in DB, treat as [] in state (admins get null on save)
       site_access: (p.site_access as string[] | null) || [],
       is_banned: !!p.is_banned,
     }));
@@ -79,7 +80,7 @@ export default function UsersPage() {
   };
 
   // --------------------------
-  // Init: current user role, then sites + users
+  // Init: ensure current user is admin, then load sites + users
   // --------------------------
   useEffect(() => {
     const init = async () => {
@@ -107,7 +108,7 @@ export default function UsersPage() {
           return;
         }
 
-        const r = (profile?.role as Role) || "inspector";
+        const r: Role = (profile?.role as Role) || "inspector";
         setCurrentRole(r);
 
         if (r !== "admin") {
@@ -169,7 +170,7 @@ export default function UsersPage() {
   };
 
   // --------------------------
-  // Save changes for a single existing user
+  // Save an existing user
   // --------------------------
   const handleSaveUser = async (userId: string) => {
     const user = users.find((u) => u.user_id === userId);
@@ -179,18 +180,24 @@ export default function UsersPage() {
       setSavingUserId(userId);
       setError(null);
 
+      // Admins: site_access = null (they can see all sites)
+      // Others: site_access = array of site IDs
+      const payload = {
+        role: user.role,
+        site_access: user.role === "admin" ? null : user.site_access,
+        is_banned: user.is_banned,
+      };
+
       const { error: updateErr } = await supabase
         .from("profiles")
-        .update({
-          role: user.role,
-          site_access: user.role === "admin" ? null : user.site_access,
-          is_banned: user.is_banned,
-        })
+        .update(payload)
         .eq("user_id", user.user_id);
 
       if (updateErr) throw updateErr;
 
       alert("User updated.");
+      // Optional: reload from DB so UI always matches DB
+      await loadUsers();
     } catch (e: any) {
       console.error("handleSaveUser error", e);
       setError(e?.message || "Could not update user.");
@@ -209,7 +216,6 @@ export default function UsersPage() {
     }
 
     if (newPin.length < 4) {
-      // you can change this rule if you want
       alert("Please use at least a 4-digit PIN.");
       return;
     }
