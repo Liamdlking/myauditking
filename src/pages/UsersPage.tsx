@@ -27,15 +27,65 @@ export default function UsersPage() {
   const [sites, setSites] = useState<SiteRow[]>([]);
   const [users, setUsers] = useState<UserRow[]>([]);
 
+  // Single-user create
+  const [newEmail, setNewEmail] = useState("");
+  const [newName, setNewName] = useState("");
+  const [newPin, setNewPin] = useState("");
+  const [newRole, setNewRole] = useState<Role>("inspector");
+  const [newSiteIds, setNewSiteIds] = useState<string[]>([]);
+  const [creatingSingle, setCreatingSingle] = useState(false);
+
+  // Bulk create
+  const [bulkCsv, setBulkCsv] = useState("");
+  const [creatingBulk, setCreatingBulk] = useState(false);
+  const [bulkResult, setBulkResult] = useState<string | null>(null);
+
   // --------------------------
-  // Load current user (must be admin) + sites + users
+  // Helpers to load sites + users
+  // --------------------------
+  const loadSites = async () => {
+    const { data, error } = await supabase
+      .from("sites")
+      .select("id, name")
+      .order("name", { ascending: true });
+
+    if (error) throw error;
+
+    const mapped: SiteRow[] = (data || []).map((s: any) => ({
+      id: s.id,
+      name: s.name,
+    }));
+    setSites(mapped);
+  };
+
+  const loadUsers = async () => {
+    const { data: profiles, error: profilesErr } = await supabase
+      .from("profiles")
+      .select("user_id, email, name, role, site_access, is_banned")
+      .order("email", { ascending: true });
+
+    if (profilesErr) throw profilesErr;
+
+    const mappedUsers: UserRow[] = (profiles || []).map((p: any) => ({
+      user_id: p.user_id,
+      email: p.email ?? null,
+      name: p.name ?? null,
+      role: (p.role as Role) || "inspector",
+      site_access: (p.site_access as string[] | null) || [],
+      is_banned: !!p.is_banned,
+    }));
+
+    setUsers(mappedUsers);
+  };
+
+  // --------------------------
+  // Init: current user role, then sites + users
   // --------------------------
   useEffect(() => {
     const init = async () => {
       setLoading(true);
       setError(null);
       try {
-        // 1) Current user + role
         const { data: userData } = await supabase.auth.getUser();
         const user = userData?.user;
         if (!user) {
@@ -61,44 +111,13 @@ export default function UsersPage() {
         setCurrentRole(r);
 
         if (r !== "admin") {
-          // Only admins can use this page
           setError("Only admins can manage users.");
           setLoading(false);
           return;
         }
 
-        // 2) Sites
-        const { data: sitesData, error: sitesErr } = await supabase
-          .from("sites")
-          .select("id, name")
-          .order("name", { ascending: true });
-
-        if (sitesErr) throw sitesErr;
-
-        const mappedSites: SiteRow[] = (sitesData || []).map((s: any) => ({
-          id: s.id,
-          name: s.name,
-        }));
-        setSites(mappedSites);
-
-        // 3) Users (profiles)
-        const { data: profiles, error: profilesErr } = await supabase
-          .from("profiles")
-          .select("user_id, email, name, role, site_access, is_banned")
-          .order("email", { ascending: true });
-
-        if (profilesErr) throw profilesErr;
-
-        const mappedUsers: UserRow[] = (profiles || []).map((p: any) => ({
-          user_id: p.user_id,
-          email: p.email ?? null,
-          name: p.name ?? null,
-          role: (p.role as Role) || "inspector",
-          site_access: (p.site_access as string[] | null) || [],
-          is_banned: !!p.is_banned,
-        }));
-
-        setUsers(mappedUsers);
+        await loadSites();
+        await loadUsers();
       } catch (e: any) {
         console.error("UsersPage init error", e);
         setError(e?.message || "Could not load users.");
@@ -141,15 +160,21 @@ export default function UsersPage() {
     );
   };
 
+  const toggleNewUserSite = (siteId: string) => {
+    setNewSiteIds((prev) =>
+      prev.includes(siteId)
+        ? prev.filter((id) => id !== siteId)
+        : [...prev, siteId]
+    );
+  };
+
   // --------------------------
-  // Save changes for a single user
+  // Save changes for a single existing user
   // --------------------------
   const handleSaveUser = async (userId: string) => {
     const user = users.find((u) => u.user_id === userId);
     if (!user) return;
 
-    // Safety: never let admin lock themselves out accidentally (optional)
-    // You can remove this guard if you want full freedom.
     try {
       setSavingUserId(userId);
       setError(null);
@@ -158,8 +183,7 @@ export default function UsersPage() {
         .from("profiles")
         .update({
           role: user.role,
-          site_access:
-            user.role === "admin" ? null : user.site_access, // admins don't need site restriction
+          site_access: user.role === "admin" ? null : user.site_access,
           is_banned: user.is_banned,
         })
         .eq("user_id", user.user_id);
@@ -172,6 +196,203 @@ export default function UsersPage() {
       setError(e?.message || "Could not update user.");
     } finally {
       setSavingUserId(null);
+    }
+  };
+
+  // --------------------------
+  // Create single user
+  // --------------------------
+  const handleCreateSingleUser = async () => {
+    if (!newEmail.trim() || !newPin.trim()) {
+      alert("Email and PIN are required.");
+      return;
+    }
+
+    if (newPin.length < 4) {
+      // you can change this rule if you want
+      alert("Please use at least a 4-digit PIN.");
+      return;
+    }
+
+    try {
+      setCreatingSingle(true);
+      setError(null);
+
+      // 1) Create auth user (password = PIN)
+      const { data, error: signUpErr } = await supabase.auth.signUp({
+        email: newEmail.trim(),
+        password: newPin,
+      });
+
+      if (signUpErr) throw signUpErr;
+
+      const createdUser = data.user;
+      if (!createdUser) {
+        throw new Error("User was not created.");
+      }
+
+      // 2) Insert profile
+      const site_access =
+        newRole === "admin" ? null : newSiteIds;
+
+      const { error: profileErr } = await supabase
+        .from("profiles")
+        .insert({
+          user_id: createdUser.id,
+          email: newEmail.trim(),
+          name: newName.trim() || newEmail.trim(),
+          role: newRole || "inspector",
+          site_access,
+          is_banned: false,
+        });
+
+      if (profileErr) throw profileErr;
+
+      // 3) Reload users so new user appears in table
+      await loadUsers();
+
+      // Reset form
+      setNewEmail("");
+      setNewName("");
+      setNewPin("");
+      setNewRole("inspector");
+      setNewSiteIds([]);
+
+      alert("User created.");
+    } catch (e: any) {
+      console.error("handleCreateSingleUser error", e);
+      setError(e?.message || "Could not create user.");
+    } finally {
+      setCreatingSingle(false);
+    }
+  };
+
+  // --------------------------
+  // Bulk create users from CSV
+  // --------------------------
+  /**
+   * CSV format (example):
+   * email,pin,name,role,sites
+   * jane@example.com,1234,Jane Smith,manager,Site A|Site B
+   * bob@example.com,9999,Bob Jones,inspector,Site A
+   *
+   * "sites" is a list of site names separated by | that must match your site names.
+   */
+  const handleBulkCreate = async () => {
+    if (!bulkCsv.trim()) {
+      alert("Paste some CSV first.");
+      return;
+    }
+
+    setCreatingBulk(true);
+    setBulkResult(null);
+    setError(null);
+
+    try {
+      const lines = bulkCsv
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+
+      if (lines.length <= 1) {
+        throw new Error("Please include a header row and at least one data row.");
+      }
+
+      const header = lines[0].split(",").map((h) => h.trim().toLowerCase());
+      const idxEmail = header.indexOf("email");
+      const idxPin = header.indexOf("pin");
+      const idxName = header.indexOf("name");
+      const idxRole = header.indexOf("role");
+      const idxSites = header.indexOf("sites");
+
+      if (idxEmail === -1 || idxPin === -1) {
+        throw new Error("Header must include at least 'email' and 'pin'.");
+      }
+
+      let created = 0;
+      let failed = 0;
+      const failures: string[] = [];
+
+      // Map site name -> id for convenience
+      const siteNameToId = new Map<string, string>();
+      for (const s of sites) {
+        siteNameToId.set(s.name.toLowerCase(), s.id);
+      }
+
+      for (let i = 1; i < lines.length; i++) {
+        const row = lines[i];
+        const cols = row.split(",").map((c) => c.trim());
+        const email = cols[idxEmail];
+        const pin = cols[idxPin];
+        const name = idxName >= 0 ? cols[idxName] : "";
+        const roleRaw = idxRole >= 0 ? cols[idxRole] : "";
+        const role: Role =
+          roleRaw === "admin" || roleRaw === "manager" || roleRaw === "inspector"
+            ? (roleRaw as Role)
+            : "inspector";
+
+        let siteIds: string[] = [];
+        if (idxSites >= 0 && cols[idxSites]) {
+          const siteNames = cols[idxSites].split("|").map((s) => s.trim());
+          siteIds = siteNames
+            .map((sn) => siteNameToId.get(sn.toLowerCase()))
+            .filter((id): id is string => !!id);
+        }
+
+        if (!email || !pin) {
+          failed++;
+          failures.push(`Row ${i + 1}: missing email or pin`);
+          continue;
+        }
+
+        try {
+          const { data, error: signUpErr } = await supabase.auth.signUp({
+            email,
+            password: pin,
+          });
+          if (signUpErr) throw signUpErr;
+
+          const createdUser = data.user;
+          if (!createdUser) {
+            throw new Error("No user returned");
+          }
+
+          const { error: profileErr } = await supabase
+            .from("profiles")
+            .insert({
+              user_id: createdUser.id,
+              email,
+              name: name || email,
+              role,
+              site_access: role === "admin" ? null : siteIds,
+              is_banned: false,
+            });
+
+          if (profileErr) throw profileErr;
+
+          created++;
+        } catch (e: any) {
+          console.error(`bulk create row ${i + 1} error`, e);
+          failed++;
+          failures.push(`Row ${i + 1}: ${e?.message || "unknown error"}`);
+        }
+      }
+
+      await loadUsers();
+
+      let summary = `Created ${created} user(s).`;
+      if (failed) {
+        summary += ` Failed ${failed} row(s).`;
+      }
+      if (failures.length) {
+        summary += "\n" + failures.join("\n");
+      }
+      setBulkResult(summary);
+    } catch (e: any) {
+      console.error("handleBulkCreate error", e);
+      setError(e?.message || "Bulk create failed.");
+    } finally {
+      setCreatingBulk(false);
     }
   };
 
@@ -204,8 +425,8 @@ export default function UsersPage() {
         <div>
           <h1 className="text-2xl font-bold text-purple-700">Users</h1>
           <p className="text-sm text-gray-600">
-            Assign roles and sites. Managers and inspectors can only see and
-            work with templates/inspections for their assigned sites.
+            Create users, assign roles and sites. Managers and inspectors only
+            see templates and inspections for their assigned sites.
           </p>
         </div>
       </div>
@@ -216,6 +437,138 @@ export default function UsersPage() {
         </div>
       )}
 
+      {/* Create single user + bulk users */}
+      <div className="grid md:grid-cols-2 gap-4">
+        {/* Single user */}
+        <div className="rounded-2xl border bg-white p-4 space-y-3 text-xs">
+          <div className="font-semibold text-gray-800">
+            Create single user
+          </div>
+          <div>
+            <label className="block text-[11px] text-gray-500 mb-1">
+              Email
+            </label>
+            <input
+              value={newEmail}
+              onChange={(e) => setNewEmail(e.target.value)}
+              className="w-full border rounded-xl px-3 py-2 text-sm"
+              placeholder="user@example.com"
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] text-gray-500 mb-1">
+              Name
+            </label>
+            <input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              className="w-full border rounded-xl px-3 py-2 text-sm"
+              placeholder="Optional display name"
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] text-gray-500 mb-1">
+              PIN (used as password)
+            </label>
+            <input
+              value={newPin}
+              onChange={(e) => setNewPin(e.target.value)}
+              className="w-full border rounded-xl px-3 py-2 text-sm"
+              placeholder="e.g. 1234"
+            />
+          </div>
+          <div className="flex flex-wrap gap-2 items-center">
+            <div>
+              <label className="block text-[11px] text-gray-500 mb-1">
+                Role
+              </label>
+              <select
+                value={newRole || "inspector"}
+                onChange={(e) =>
+                  setNewRole(e.target.value as Role)
+                }
+                className="border rounded-xl px-3 py-2 text-sm"
+              >
+                <option value="admin">Admin</option>
+                <option value="manager">Manager</option>
+                <option value="inspector">Inspector</option>
+              </select>
+            </div>
+          </div>
+          {newRole !== "admin" && (
+            <div>
+              <label className="block text-[11px] text-gray-500 mb-1">
+                Sites for this user
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {sites.length === 0 ? (
+                  <div className="text-[11px] text-gray-500">
+                    No sites configured.
+                  </div>
+                ) : (
+                  sites.map((s) => (
+                    <label
+                      key={s.id}
+                      className="inline-flex items-center gap-1 border rounded-xl px-2 py-1 text-[11px] cursor-pointer bg-gray-50"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={newSiteIds.includes(s.id)}
+                        onChange={() => toggleNewUserSite(s.id)}
+                      />
+                      <span>{s.name}</span>
+                    </label>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+          <button
+            onClick={handleCreateSingleUser}
+            disabled={creatingSingle}
+            className="w-full mt-2 px-3 py-2 rounded-xl bg-purple-700 text-white text-xs hover:bg-purple-800 disabled:opacity-50"
+          >
+            {creatingSingle ? "Creating user…" : "Create user"}
+          </button>
+          <p className="text-[10px] text-gray-400">
+            The PIN is used as the initial password. Users can log in with
+            email + PIN.
+          </p>
+        </div>
+
+        {/* Bulk users */}
+        <div className="rounded-2xl border bg-white p-4 space-y-3 text-xs">
+          <div className="font-semibold text-gray-800">
+            Bulk create users (CSV)
+          </div>
+          <p className="text-[11px] text-gray-500">
+            Paste CSV with columns: <code>email,pin,name,role,sites</code>.
+            Sites should match your site names and be separated by <code>|</code>.
+          </p>
+          <textarea
+            value={bulkCsv}
+            onChange={(e) => setBulkCsv(e.target.value)}
+            className="w-full border rounded-xl px-3 py-2 text-xs min-h-[120px]"
+            placeholder={`email,pin,name,role,sites
+jane@example.com,1234,Jane Smith,manager,Site A|Site B
+bob@example.com,9999,Bob Jones,inspector,Site A`}
+          />
+          <button
+            onClick={handleBulkCreate}
+            disabled={creatingBulk}
+            className="w-full px-3 py-2 rounded-xl bg-purple-700 text-white text-xs hover:bg-purple-800 disabled:opacity-50"
+          >
+            {creatingBulk ? "Creating users…" : "Bulk create users"}
+          </button>
+          {bulkResult && (
+            <pre className="mt-2 text-[10px] text-gray-600 whitespace-pre-wrap bg-gray-50 border rounded-xl p-2">
+              {bulkResult}
+            </pre>
+          )}
+        </div>
+      </div>
+
+      {/* Existing users table */}
       {users.length === 0 ? (
         <div className="rounded-2xl border bg-white p-4 text-sm text-gray-600">
           No users found.
