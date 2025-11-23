@@ -1,3 +1,4 @@
+// src/pages/TemplatesPage.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/utils/supabaseClient";
@@ -22,6 +23,7 @@ type SiteRow = {
 export default function TemplatesPage() {
   const [role, setRole] = useState<Role>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [siteAccess, setSiteAccess] = useState<string[] | null>(null);
 
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
   const [sites, setSites] = useState<SiteRow[]>([]);
@@ -42,7 +44,7 @@ export default function TemplatesPage() {
   const canEdit = isAdmin || isManager;
 
   // --------------------------
-  // Load current user + role
+  // Load current user + role + site_access
   // --------------------------
   useEffect(() => {
     const loadUser = async () => {
@@ -52,24 +54,32 @@ export default function TemplatesPage() {
         if (!user) {
           setCurrentUserId(null);
           setRole(null);
+          setSiteAccess(null);
           return;
         }
         setCurrentUserId(user.id);
 
         const { data: profile, error: profileError } = await supabase
           .from("profiles")
-          .select("role")
+          .select("role, site_access")
           .eq("user_id", user.id)
           .single();
 
         if (!profileError && profile) {
           setRole((profile.role as Role) || "inspector");
+          setSiteAccess(
+            profile.site_access === null
+              ? null
+              : ((profile.site_access as string[]) || [])
+          );
         } else {
           setRole("inspector");
+          setSiteAccess([]);
         }
       } catch (e) {
         console.error("loadUser error", e);
         setRole("inspector");
+        setSiteAccess([]);
       }
     };
 
@@ -144,20 +154,45 @@ export default function TemplatesPage() {
     return s ? s.name : "Unknown site";
   };
 
+  // Sites the current user is allowed to see in the filter
+  const visibleSites = useMemo(() => {
+    if (!sites.length) return [];
+    if (role === "admin") return sites;
+    if (!siteAccess || siteAccess.length === 0) {
+      return []; // they’ll still see “All sites” (for global templates)
+    }
+    return sites.filter((s) => siteAccess.includes(s.id));
+  }, [sites, role, siteAccess]);
+
+  // Apply access rules + filters to templates
   const filteredTemplates = useMemo(() => {
-    return templates.filter((tpl) => {
-      if (selectedSiteId !== "all" && tpl.site_id !== selectedSiteId) {
-        return false;
-      }
-      if (publishedFilter === "published" && !tpl.is_published) {
-        return false;
-      }
-      if (publishedFilter === "unpublished" && tpl.is_published) {
-        return false;
-      }
-      return true;
-    });
-  }, [templates, selectedSiteId, publishedFilter]);
+    let list = [...templates];
+
+    // 1) Access control via site_access
+    if (role !== "admin") {
+      const allowed = siteAccess || [];
+      list = list.filter((tpl) => {
+        // global template – visible to everyone
+        if (!tpl.site_id) return true;
+        // otherwise must be in site_access
+        return allowed.includes(tpl.site_id);
+      });
+    }
+
+    // 2) Site filter
+    if (selectedSiteId !== "all") {
+      list = list.filter((tpl) => tpl.site_id === selectedSiteId);
+    }
+
+    // 3) Published filter
+    if (publishedFilter === "published") {
+      list = list.filter((tpl) => tpl.is_published);
+    } else if (publishedFilter === "unpublished") {
+      list = list.filter((tpl) => !tpl.is_published);
+    }
+
+    return list;
+  }, [templates, role, siteAccess, selectedSiteId, publishedFilter]);
 
   // --------------------------
   // Actions
@@ -202,15 +237,14 @@ export default function TemplatesPage() {
     }
   };
 
-  // 🔴 NEW: admin-only delete handler
   const handleDeleteTemplate = async (tpl: TemplateRow) => {
-    if (!isAdmin) {
-      alert("Only admins can delete templates.");
+    if (!canEdit) {
+      alert("Only managers/admins can delete templates.");
       return;
     }
     if (
       !window.confirm(
-        `Delete template “${tpl.name}”? This cannot be undone.`
+        `Delete template "${tpl.name}"? This cannot be undone.`
       )
     ) {
       return;
@@ -223,11 +257,10 @@ export default function TemplatesPage() {
         .eq("id", tpl.id);
 
       if (error) throw error;
-
-      await loadTemplates();
+      setTemplates((prev) => prev.filter((t) => t.id !== tpl.id));
       alert("Template deleted.");
     } catch (e: any) {
-      console.error("deleteTemplate error", e);
+      console.error("delete template error", e);
       alert(e?.message || "Could not delete template.");
     }
   };
@@ -248,8 +281,7 @@ export default function TemplatesPage() {
         .eq("user_id", user.id)
         .single();
 
-      const ownerName =
-        profile?.name || user.email || "Inspector";
+      const ownerName = profile?.name || user.email || "Inspector";
 
       const nowIso = new Date().toISOString();
 
@@ -333,7 +365,7 @@ export default function TemplatesPage() {
             className="border rounded-xl px-3 py-1"
           >
             <option value="all">All sites</option>
-            {sites.map((s) => (
+            {visibleSites.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}
               </option>
@@ -367,11 +399,11 @@ export default function TemplatesPage() {
       )}
 
       {loading ? (
-        <div className="rounded-xl border bg-white p-4 text-sm text-gray-600">
+        <div className="rounded-2xl border bg-white p-4 text-sm text-gray-600">
           Loading templates…
         </div>
       ) : filteredTemplates.length === 0 ? (
-        <div className="rounded-xl border bg-white p-4 text-sm text-gray-600">
+        <div className="rounded-2xl border bg-white p-4 text-sm text-gray-600">
           No templates found for the current filters.
         </div>
       ) : (
@@ -416,7 +448,7 @@ export default function TemplatesPage() {
                 </p>
               )}
 
-              <div className="flex gap-2 text-xs">
+              <div className="flex flex-wrap gap-2 text-xs">
                 <button
                   onClick={() => handleStartInspection(tpl)}
                   className="flex-1 px-3 py-1 rounded-xl border hover:bg-gray-50"
@@ -437,14 +469,12 @@ export default function TemplatesPage() {
                     >
                       {tpl.is_published ? "Unpublish" : "Publish"}
                     </button>
-                    {isAdmin && (
-                      <button
-                        onClick={() => handleDeleteTemplate(tpl)}
-                        className="px-3 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
-                      >
-                        Delete
-                      </button>
-                    )}
+                    <button
+                      onClick={() => handleDeleteTemplate(tpl)}
+                      className="px-3 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
+                    >
+                      Delete
+                    </button>
                   </>
                 )}
               </div>
