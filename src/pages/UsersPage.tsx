@@ -1,825 +1,348 @@
-import React, { useEffect, useMemo, useState } from "react";
+// src/pages/UsersPage.tsx
+import React, { useEffect, useState } from "react";
 import { supabase } from "@/utils/supabaseClient";
-import AdminGuard from "@/components/AdminGuard";
 
-type ProfileRow = {
+type Role = "admin" | "manager" | "inspector" | string | null;
+
+type SiteRow = {
+  id: string;
+  name: string;
+};
+
+type UserRow = {
   user_id: string;
-  email: string;
+  email: string | null;
   name: string | null;
-  role: string;
-  pin_code: string | null;
-  site_access: string[] | null;
+  role: Role;
+  site_access: string[];
   is_banned: boolean;
 };
 
-type CsvUser = {
-  email: string;
-  name: string;
-  role: string;
-  pin_code: string;
-  site_access: string[];
-};
-
 export default function UsersPage() {
-  const [profiles, setProfiles] = useState<ProfileRow[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [errorText, setErrorText] = useState<string | null>(null);
+  const [currentRole, setCurrentRole] = useState<Role>(null);
+  const [loading, setLoading] = useState(true);
+  const [savingUserId, setSavingUserId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const [csvPreview, setCsvPreview] = useState<CsvUser[] | null>(null);
-  const [csvError, setCsvError] = useState<string | null>(null);
-  const [csvImporting, setCsvImporting] = useState(false);
+  const [sites, setSites] = useState<SiteRow[]>([]);
+  const [users, setUsers] = useState<UserRow[]>([]);
 
-  const [roleFilter, setRoleFilter] = useState<"all" | "inspector" | "manager" | "admin">(
-    "all"
-  );
-  const [siteFilter, setSiteFilter] = useState<string>("");
-
-  const [busyUserId, setBusyUserId] = useState<string | null>(null); // per-row actions
-
-  // Single user create form state
-  const [singleEmail, setSingleEmail] = useState("");
-  const [singleName, setSingleName] = useState("");
-  const [singleRole, setSingleRole] = useState<"inspector" | "manager" | "admin">(
-    "inspector"
-  );
-  const [singlePin, setSinglePin] = useState("");
-  const [singleSites, setSingleSites] = useState("");
-  const [singleBusy, setSingleBusy] = useState(false);
-  const [singleError, setSingleError] = useState<string | null>(null);
-
-  // ---------------------------------------------
-  // Load existing profiles
-  // ---------------------------------------------
-  const loadProfiles = async () => {
-    setLoading(true);
-    setErrorText(null);
-    try {
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("user_id,email,name,role,pin_code,site_access,is_banned")
-        .order("email", { ascending: true });
-
-      if (error) {
-        console.error(error);
-        setErrorText(error.message || "Could not load users.");
-      } else {
-        setProfiles((data || []) as ProfileRow[]);
-      }
-    } catch (err: any) {
-      console.error(err);
-      setErrorText("Unexpected error loading users.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // --------------------------
+  // Load current user (must be admin) + sites + users
+  // --------------------------
   useEffect(() => {
-    loadProfiles();
+    const init = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        // 1) Current user + role
+        const { data: userData } = await supabase.auth.getUser();
+        const user = userData?.user;
+        if (!user) {
+          setError("You must be logged in to view this page.");
+          setLoading(false);
+          return;
+        }
+
+        const { data: profile, error: profileErr } = await supabase
+          .from("profiles")
+          .select("role")
+          .eq("user_id", user.id)
+          .single();
+
+        if (profileErr) {
+          console.error("load current profile error", profileErr);
+          setError("Could not load your profile.");
+          setLoading(false);
+          return;
+        }
+
+        const r = (profile?.role as Role) || "inspector";
+        setCurrentRole(r);
+
+        if (r !== "admin") {
+          // Only admins can use this page
+          setError("Only admins can manage users.");
+          setLoading(false);
+          return;
+        }
+
+        // 2) Sites
+        const { data: sitesData, error: sitesErr } = await supabase
+          .from("sites")
+          .select("id, name")
+          .order("name", { ascending: true });
+
+        if (sitesErr) throw sitesErr;
+
+        const mappedSites: SiteRow[] = (sitesData || []).map((s: any) => ({
+          id: s.id,
+          name: s.name,
+        }));
+        setSites(mappedSites);
+
+        // 3) Users (profiles)
+        const { data: profiles, error: profilesErr } = await supabase
+          .from("profiles")
+          .select("user_id, email, name, role, site_access, is_banned")
+          .order("email", { ascending: true });
+
+        if (profilesErr) throw profilesErr;
+
+        const mappedUsers: UserRow[] = (profiles || []).map((p: any) => ({
+          user_id: p.user_id,
+          email: p.email ?? null,
+          name: p.name ?? null,
+          role: (p.role as Role) || "inspector",
+          site_access: (p.site_access as string[] | null) || [],
+          is_banned: !!p.is_banned,
+        }));
+
+        setUsers(mappedUsers);
+      } catch (e: any) {
+        console.error("UsersPage init error", e);
+        setError(e?.message || "Could not load users.");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    init();
   }, []);
 
-  // ---------------------------------------------
-  // Derived site options for filter
-  // ---------------------------------------------
-  const allSites = useMemo(() => {
-    const set = new Set<string>();
-    profiles.forEach((p) => {
-      (p.site_access || []).forEach((s) => {
-        if (s) set.add(s);
-      });
-    });
-    return Array.from(set).sort();
-  }, [profiles]);
+  const isAdmin = currentRole === "admin";
 
-  // ---------------------------------------------
-  // Filtered profiles for display
-  // ---------------------------------------------
-  const filteredProfiles = useMemo(() => {
-    return profiles.filter((p) => {
-      const matchesRole = roleFilter === "all" || (p.role || "inspector") === roleFilter;
-      const matchesSite =
-        !siteFilter ||
-        (p.site_access || []).some((s) => s === siteFilter);
-      return matchesRole && matchesSite;
-    });
-  }, [profiles, roleFilter, siteFilter]);
-
-  // ---------------------------------------------
-  // Single user create
-  // ---------------------------------------------
-  const handleCreateSingleUser = async () => {
-    setSingleError(null);
-
-    const email = singleEmail.trim();
-    const pin = singlePin.trim();
-    const name = singleName.trim();
-    const role = singleRole;
-    const sitesRaw = singleSites.trim();
-
-    if (!email || !pin) {
-      setSingleError("Email and PIN are required.");
-      return;
-    }
-
-    const site_access =
-      sitesRaw.length > 0
-        ? sitesRaw
-            .split("|")
-            .map((s) => s.trim())
-            .filter(Boolean)
-        : [];
-
-    setSingleBusy(true);
-
-    try {
-      // 1) Create Supabase Auth user with email + password = PIN
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email,
-        password: pin,
-      });
-
-      if (authError) {
-        console.error(authError);
-        setSingleError(authError.message || "Could not create auth user.");
-        setSingleBusy(false);
-        return;
-      }
-
-      const userId = authData.user?.id;
-      if (!userId) {
-        setSingleError("User created but no ID returned from Supabase.");
-        setSingleBusy(false);
-        return;
-      }
-
-      // 2) Insert / upsert profile row
-      const { error: profileError } = await supabase.from("profiles").upsert(
-        {
-          user_id: userId,
-          email,
-          name: name || email,
-          role,
-          pin_code: pin,
-          site_access,
-          is_banned: false,
-        } as any,
-        {
-          onConflict: "user_id",
-        }
-      );
-
-      if (profileError) {
-        console.error(profileError);
-        setSingleError(profileError.message || "Could not create profile row.");
-        setSingleBusy(false);
-        return;
-      }
-
-      // Clear form and refresh list
-      setSingleEmail("");
-      setSingleName("");
-      setSinglePin("");
-      setSingleSites("");
-      setSingleRole("inspector");
-      await loadProfiles();
-      alert("User created successfully.");
-    } catch (err: any) {
-      console.error(err);
-      setSingleError("Unexpected error creating user.");
-    } finally {
-      setSingleBusy(false);
-    }
-  };
-
-  // ---------------------------------------------
-  // CSV parsing (email,name,role,pin_code,sites)
-  // sites: site-a|site-b
-  // ---------------------------------------------
-  const handleCsvFile = (file: File) => {
-    setCsvError(null);
-    setCsvPreview(null);
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const text = String(reader.result || "").trim();
-        if (!text) {
-          setCsvError("File is empty.");
-          return;
-        }
-
-        const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-        if (lines.length < 2) {
-          setCsvError("File must have a header row and at least one user row.");
-          return;
-        }
-
-        const header = lines[0].split(",").map((h) => h.trim().toLowerCase());
-        const idxEmail = header.indexOf("email");
-        const idxName = header.indexOf("name");
-        const idxRole = header.indexOf("role");
-        const idxPin = header.indexOf("pin_code");
-        const idxSites = header.indexOf("sites");
-
-        if (idxEmail === -1 || idxPin === -1) {
-          setCsvError(
-            "Header must include at least: email,pin_code. Optional: name,role,sites"
-          );
-          return;
-        }
-
-        const preview: CsvUser[] = [];
-
-        for (let i = 1; i < lines.length; i++) {
-          const line = lines[i];
-          if (!line) continue;
-          const cols = line.split(",").map((c) => c.trim());
-
-          const email = cols[idxEmail] || "";
-          const pin_code = cols[idxPin] || "";
-          const name = idxName !== -1 ? cols[idxName] || "" : "";
-          const role = idxRole !== -1 ? cols[idxRole] || "inspector" : "inspector";
-          const sitesCell = idxSites !== -1 ? cols[idxSites] || "" : "";
-          const site_access =
-            sitesCell
-              ?.split("|")
-              .map((s) => s.trim())
-              .filter(Boolean) ?? [];
-
-          if (!email || !pin_code) {
-            continue; // skip broken rows quietly
-          }
-
-          preview.push({
-            email,
-            name,
-            role,
-            pin_code,
-            site_access,
-          });
-        }
-
-        if (!preview.length) {
-          setCsvError("No valid rows found. Check your CSV formatting.");
-          return;
-        }
-
-        setCsvPreview(preview);
-      } catch (err: any) {
-        console.error(err);
-        setCsvError("Could not parse CSV file.");
-      }
-    };
-
-    reader.onerror = () => {
-      setCsvError("Could not read file.");
-    };
-
-    reader.readAsText(file);
-  };
-
-  // ---------------------------------------------
-  // Import CSV into profiles table
-  // ---------------------------------------------
-  const importCsv = async () => {
-    if (!csvPreview || !csvPreview.length) return;
-
-    setCsvImporting(true);
-    setCsvError(null);
-
-    try {
-      const payload = csvPreview.map((u) => ({
-        email: u.email,
-        name: u.name,
-        role: u.role || "inspector",
-        pin_code: u.pin_code,
-        site_access: u.site_access,
-        // user_id can be filled later with SQL if you're using that flow
-      }));
-
-      const { error } = await supabase
-        .from("profiles")
-        .upsert(payload as any, {
-          onConflict: "email",
-        });
-
-      if (error) {
-        console.error(error);
-        setCsvError(
-          error.message || "Supabase error importing CSV into profiles table."
-        );
-        return;
-      }
-
-      setCsvPreview(null);
-      await loadProfiles();
-      alert(
-        "Profiles imported / updated. You can still use the SQL method to bind auth users, or switch fully to the single-user form."
-      );
-    } catch (err: any) {
-      console.error(err);
-      setCsvError("Unexpected error importing CSV.");
-    } finally {
-      setCsvImporting(false);
-    }
-  };
-
-  // ---------------------------------------------
-  // Export helpers
-  // ---------------------------------------------
-  const makeCsvFromProfiles = (rows: ProfileRow[]): string => {
-    const header = ["email", "name", "role", "pin_code", "sites"].join(",");
-    const lines = rows.map((p) => {
-      const sites = (p.site_access || []).join("|");
-      const safe = (v: string | null | undefined) =>
-        (v ?? "").replace(/"/g, '""'); // basic escaping
-
-      return [
-        `"${safe(p.email)}"`,
-        `"${safe(p.name || "")}"`,
-        `"${safe(p.role || "inspector")}"`,
-        `"${safe(p.pin_code || "")}"`,
-        `"${safe(sites)}"`,
-      ].join(",");
-    });
-    return [header, ...lines].join("\n");
-  };
-
-  const downloadCsv = (csv: string, filename: string) => {
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const exportAllCsv = () => {
-    if (!profiles.length) {
-      alert("No users to export.");
-      return;
-    }
-    const csv = makeCsvFromProfiles(profiles);
-    downloadCsv(csv, "users-all-export.csv");
-  };
-
-  const exportFilteredCsv = () => {
-    if (!filteredProfiles.length) {
-      alert("No users match the current filters.");
-      return;
-    }
-    const csv = makeCsvFromProfiles(filteredProfiles);
-    downloadCsv(csv, "users-filtered-export.csv");
-  };
-
-  // ---------------------------------------------
-  // Inline actions: role change, ban/unban, impersonate
-  // ---------------------------------------------
-  const updateRole = async (p: ProfileRow, newRole: string) => {
-    setBusyUserId(p.user_id);
-    try {
-      const { error } = await supabase
-        .from("profiles")
-        .update({ role: newRole })
-        .eq("user_id", p.user_id);
-
-      if (error) {
-        console.error(error);
-        alert(error.message || "Could not update role.");
-        return;
-      }
-
-      setProfiles((prev) =>
-        prev.map((row) =>
-          row.user_id === p.user_id ? { ...row, role: newRole } : row
-        )
-      );
-    } catch (err: any) {
-      console.error(err);
-      alert("Unexpected error updating role.");
-    } finally {
-      setBusyUserId(null);
-    }
-  };
-
-  const toggleBan = async (p: ProfileRow) => {
-    const next = !p.is_banned;
-    const label = next ? "ban" : "unban";
-    if (!window.confirm(`Are you sure you want to ${label} ${p.email}?`)) return;
-
-    setBusyUserId(p.user_id);
-    try {
-      const { error } = await supabase
-        .from("profiles")
-        .update({ is_banned: next })
-        .eq("user_id", p.user_id);
-
-      if (error) {
-        console.error(error);
-        alert(error.message || "Could not update ban status.");
-        return;
-      }
-
-      setProfiles((prev) =>
-        prev.map((row) =>
-          row.user_id === p.user_id ? { ...row, is_banned: next } : row
-        )
-      );
-    } catch (err: any) {
-      console.error(err);
-      alert("Unexpected error updating ban status.");
-    } finally {
-      setBusyUserId(null);
-    }
-  };
-
-  const impersonateUser = async (p: ProfileRow) => {
-    if (!p.email || !p.pin_code) {
-      alert("Cannot impersonate: user is missing email or pin_code.");
-      return;
-    }
-
-    const ok = window.confirm(
-      `This will sign you out and sign in as ${p.email}. Continue?`
+  // --------------------------
+  // Local mutators
+  // --------------------------
+  const updateUserField = (
+    userId: string,
+    patch: Partial<Pick<UserRow, "role" | "site_access" | "is_banned">>
+  ) => {
+    setUsers((prev) =>
+      prev.map((u) =>
+        u.user_id === userId ? { ...u, ...patch } : u
+      )
     );
-    if (!ok) return;
+  };
 
-    setBusyUserId(p.user_id);
+  const toggleSiteForUser = (userId: string, siteId: string) => {
+    setUsers((prev) =>
+      prev.map((u) => {
+        if (u.user_id !== userId) return u;
+        const has = u.site_access.includes(siteId);
+        return {
+          ...u,
+          site_access: has
+            ? u.site_access.filter((id) => id !== siteId)
+            : [...u.site_access, siteId],
+        };
+      })
+    );
+  };
+
+  // --------------------------
+  // Save changes for a single user
+  // --------------------------
+  const handleSaveUser = async (userId: string) => {
+    const user = users.find((u) => u.user_id === userId);
+    if (!user) return;
+
+    // Safety: never let admin lock themselves out accidentally (optional)
+    // You can remove this guard if you want full freedom.
     try {
-      await supabase.auth.signOut();
+      setSavingUserId(userId);
+      setError(null);
 
-      const { error } = await supabase.auth.signInWithPassword({
-        email: p.email,
-        password: p.pin_code,
-      });
+      const { error: updateErr } = await supabase
+        .from("profiles")
+        .update({
+          role: user.role,
+          site_access:
+            user.role === "admin" ? null : user.site_access, // admins don't need site restriction
+          is_banned: user.is_banned,
+        })
+        .eq("user_id", user.user_id);
 
-      if (error) {
-        console.error(error);
-        alert(
-          error.message ||
-            "Could not impersonate user. Check that their Supabase password matches their PIN."
-        );
-        return;
-      }
+      if (updateErr) throw updateErr;
 
-      window.location.href = "/";
-    } catch (err: any) {
-      console.error(err);
-      alert("Unexpected error while impersonating user.");
+      alert("User updated.");
+    } catch (e: any) {
+      console.error("handleSaveUser error", e);
+      setError(e?.message || "Could not update user.");
     } finally {
-      setBusyUserId(null);
+      setSavingUserId(null);
     }
   };
 
-  return (
-    <AdminGuard>
-      <div className="p-6 space-y-6">
-        <h1 className="text-2xl font-bold text-purple-700">Users & Bulk Import</h1>
-
-        {/* Single user create panel */}
-        <div className="rounded-2xl bg-white border p-4 space-y-4">
-          <h2 className="text-lg font-semibold text-gray-800">Create Single User</h2>
-          <p className="text-xs text-gray-600">
-            Use this for one-off users. This will create a Supabase auth user and a
-            matching profile. The{" "}
-            <span className="font-semibold">PIN is also the login password</span> for
-            that user.
-          </p>
-          <div className="grid gap-3 md:grid-cols-5 items-end">
-            <div className="md:col-span-2">
-              <label className="block text-xs text-gray-600 mb-1">Email *</label>
-              <input
-                type="email"
-                value={singleEmail}
-                onChange={(e) => setSingleEmail(e.target.value)}
-                className="w-full border rounded-xl px-3 py-2 text-sm"
-                placeholder="worker@company.com"
-              />
-            </div>
-            <div className="md:col-span-2">
-              <label className="block text-xs text-gray-600 mb-1">Name</label>
-              <input
-                type="text"
-                value={singleName}
-                onChange={(e) => setSingleName(e.target.value)}
-                className="w-full border rounded-xl px-3 py-2 text-sm"
-                placeholder="Worker Name"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-600 mb-1">Role</label>
-              <select
-                value={singleRole}
-                onChange={(e) =>
-                  setSingleRole(e.target.value as "inspector" | "manager" | "admin")
-                }
-                className="w-full border rounded-xl px-3 py-2 text-sm"
-              >
-                <option value="inspector">Inspector</option>
-                <option value="manager">Manager</option>
-                <option value="admin">Admin</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="grid gap-3 md:grid-cols-4 items-end">
-            <div>
-              <label className="block text-xs text-gray-600 mb-1">PIN *</label>
-              <input
-                type="text"
-                value={singlePin}
-                onChange={(e) => setSinglePin(e.target.value)}
-                className="w-full border rounded-xl px-3 py-2 text-sm"
-                placeholder="1234"
-              />
-            </div>
-            <div className="md:col-span-2">
-              <label className="block text-xs text-gray-600 mb-1">
-                Sites (optional, use <code>|</code> to separate)
-              </label>
-              <input
-                type="text"
-                value={singleSites}
-                onChange={(e) => setSingleSites(e.target.value)}
-                className="w-full border rounded-xl px-3 py-2 text-sm"
-                placeholder="site-a|site-b"
-              />
-            </div>
-            <div className="text-right">
-              <button
-                onClick={handleCreateSingleUser}
-                disabled={singleBusy}
-                className="px-4 py-2 rounded-xl bg-purple-700 text-white text-sm hover:bg-purple-800 disabled:opacity-50"
-              >
-                {singleBusy ? "Creating…" : "Create user"}
-              </button>
-            </div>
-          </div>
-          {singleError && (
-            <div className="text-xs text-rose-600 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">
-              {singleError}
-            </div>
-          )}
-        </div>
-
-        {/* Bulk Import Panel */}
-        <div className="rounded-2xl bg-white border p-4 space-y-4">
-          <h2 className="text-lg font-semibold text-gray-800">
-            Bulk Import Users via CSV
-          </h2>
-          <p className="text-xs text-gray-600 leading-relaxed">
-            Upload a CSV to quickly create or update many users at once. This fills the{" "}
-            <code className="bg-gray-100 px-1 rounded">profiles</code> table. You can
-            still use the SQL method to bind auth users, or move entirely to the single
-            user form which creates auth + profile in one go.
-          </p>
-
-          <div className="space-y-2 text-xs">
-            <div className="font-semibold">CSV format (header row required):</div>
-            <pre className="bg-gray-100 rounded-xl p-2 overflow-auto text-[11px]">
-{`email,name,role,pin_code,sites
-worker1@company.com,Worker One,inspector,1111,site-a
-worker2@company.com,Worker Two,manager,2222,site-a|site-b
-worker3@company.com,Worker Three,admin,3333,site-b`}
-            </pre>
-            <ul className="list-disc pl-4 space-y-1">
-              <li>
-                <span className="font-semibold">email</span> – required
-              </li>
-              <li>
-                <span className="font-semibold">pin_code</span> – required (usually the
-                login PIN/password)
-              </li>
-              <li>
-                <span className="font-semibold">role</span> – optional (defaults to{" "}
-                <code>inspector</code>)
-              </li>
-              <li>
-                <span className="font-semibold">sites</span> – optional, use{" "}
-                <code>|</code> to separate multiple sites (e.g.{" "}
-                <code>site-a|site-b</code>)
-              </li>
-            </ul>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <label className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border bg-gray-50 text-xs cursor-pointer hover:bg-gray-100">
-              <input
-                type="file"
-                accept=".csv,text/csv"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) handleCsvFile(file);
-                }}
-              />
-              Choose CSV file…
-            </label>
-            {csvPreview && (
-              <span className="text-xs text-gray-600">
-                Parsed {csvPreview.length} user(s) from CSV.
-              </span>
-            )}
-          </div>
-
-          {csvError && (
-            <div className="text-xs text-rose-600 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">
-              {csvError}
-            </div>
-          )}
-
-          {csvPreview && (
-            <div className="border rounded-xl p-3 bg-gray-50 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="text-xs font-semibold text-gray-700">
-                  Preview ({csvPreview.length} users)
-                </div>
-                <button
-                  onClick={importCsv}
-                  disabled={csvImporting}
-                  className="px-3 py-1 rounded-xl bg-purple-700 text-white text-xs hover:bg-purple-800 disabled:opacity-50"
-                >
-                  {csvImporting ? "Importing…" : "Import into profiles"}
-                </button>
-              </div>
-              <div className="max-h-48 overflow-auto text-xs">
-                <table className="w-full text-left text-[11px]">
-                  <thead>
-                    <tr className="border-b">
-                      <th className="py-1 pr-2 font-semibold">Email</th>
-                      <th className="py-1 pr-2 font-semibold">Name</th>
-                      <th className="py-1 pr-2 font-semibold">Role</th>
-                      <th className="py-1 pr-2 font-semibold">PIN</th>
-                      <th className="py-1 pr-2 font-semibold">Sites</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {csvPreview.map((u, idx) => (
-                      <tr key={idx} className="border-b last:border-0">
-                        <td className="py-1 pr-2">{u.email}</td>
-                        <td className="py-1 pr-2">{u.name}</td>
-                        <td className="py-1 pr-2">{u.role}</td>
-                        <td className="py-1 pr-2">{u.pin_code}</td>
-                        <td className="py-1 pr-2">
-                          {u.site_access && u.site_access.length
-                            ? u.site_access.join(", ")
-                            : "—"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="text-[11px] text-gray-500">
-                Existing profiles with the same email will be updated. New emails will
-                be inserted.
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Existing users list + filters + actions */}
-        <div className="rounded-2xl bg-white border p-4 space-y-3">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <h2 className="text-lg font-semibold text-gray-800">Existing Users</h2>
-            <div className="flex flex-wrap gap-2 items-center text-xs">
-              <div className="flex items-center gap-1">
-                <span className="text-gray-600">Role:</span>
-                <select
-                  value={roleFilter}
-                  onChange={(e) =>
-                    setRoleFilter(
-                      e.target.value as "all" | "inspector" | "manager" | "admin"
-                    )
-                  }
-                  className="border rounded-xl px-2 py-1 text-xs"
-                >
-                  <option value="all">All</option>
-                  <option value="inspector">Inspector</option>
-                  <option value="manager">Manager</option>
-                  <option value="admin">Admin</option>
-                </select>
-              </div>
-              <div className="flex items-center gap-1">
-                <span className="text-gray-600">Site:</span>
-                <select
-                  value={siteFilter}
-                  onChange={(e) => setSiteFilter(e.target.value)}
-                  className="border rounded-xl px-2 py-1 text-xs"
-                >
-                  <option value="">All sites</option>
-                  {allSites.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <button
-                onClick={exportAllCsv}
-                className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
-              >
-                Export all (CSV)
-              </button>
-              <button
-                onClick={exportFilteredCsv}
-                className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
-              >
-                Export filtered (CSV)
-              </button>
-              <button
-                onClick={loadProfiles}
-                className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
-              >
-                Refresh
-              </button>
-            </div>
-          </div>
-
-          {loading && <div className="text-xs text-gray-500">Loading users…</div>}
-          {errorText && (
-            <div className="text-xs text-rose-600 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2">
-              {errorText}
-            </div>
-          )}
-
-          {!loading && !filteredProfiles.length && !errorText && (
-            <div className="text-xs text-gray-600">
-              No profiles match the current filters.
-            </div>
-          )}
-
-          {filteredProfiles.length > 0 && (
-            <div className="overflow-auto max-h-80 text-xs">
-              <table className="w-full text-left text-[11px]">
-                <thead>
-                  <tr className="border-b">
-                    <th className="py-1 pr-2">Email</th>
-                    <th className="py-1 pr-2">Name</th>
-                    <th className="py-1 pr-2">Role</th>
-                    <th className="py-1 pr-2">PIN</th>
-                    <th className="py-1 pr-2">Sites</th>
-                    <th className="py-1 pr-2">Status</th>
-                    <th className="py-1 pr-2">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredProfiles.map((p) => (
-                    <tr key={p.user_id} className="border-b last:border-0">
-                      <td className="py-1 pr-2">{p.email}</td>
-                      <td className="py-1 pr-2">{p.name || "—"}</td>
-                      <td className="py-1 pr-2">
-                        <select
-                          value={p.role || "inspector"}
-                          onChange={(e) => updateRole(p, e.target.value)}
-                          className="border rounded-xl px-2 py-1 text-[11px]"
-                          disabled={busyUserId === p.user_id}
-                        >
-                          <option value="inspector">Inspector</option>
-                          <option value="manager">Manager</option>
-                          <option value="admin">Admin</option>
-                        </select>
-                      </td>
-                      <td className="py-1 pr-2">{p.pin_code || "—"}</td>
-                      <td className="py-1 pr-2">
-                        {p.site_access && p.site_access.length
-                          ? p.site_access.join(", ")
-                          : "—"}
-                      </td>
-                      <td className="py-1 pr-2">
-                        {p.is_banned ? (
-                          <span className="text-rose-600">Banned</span>
-                        ) : (
-                          <span className="text-emerald-600">Active</span>
-                        )}
-                      </td>
-                      <td className="py-1 pr-2">
-                        <div className="flex flex-wrap gap-1">
-                          <button
-                            onClick={() => toggleBan(p)}
-                            disabled={busyUserId === p.user_id}
-                            className="px-2 py-1 rounded-xl border text-[10px] hover:bg-gray-50"
-                          >
-                            {p.is_banned ? "Unban" : "Ban"}
-                          </button>
-                          <button
-                            onClick={() => impersonateUser(p)}
-                            disabled={busyUserId === p.user_id}
-                            className="px-2 py-1 rounded-xl border text-[10px] hover:bg-purple-50 text-purple-700"
-                          >
-                            Impersonate
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+  // --------------------------
+  // Render
+  // --------------------------
+  if (loading) {
+    return (
+      <div className="max-w-5xl mx-auto py-6">
+        <div className="rounded-2xl border bg-white p-4 text-sm text-gray-600">
+          Loading users…
         </div>
       </div>
-    </AdminGuard>
+    );
+  }
+
+  if (!isAdmin) {
+    return (
+      <div className="max-w-5xl mx-auto py-6">
+        <div className="rounded-2xl border bg-white p-4 text-sm text-gray-600">
+          {error || "Only admins can view this page."}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-6xl mx-auto py-6 space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-purple-700">Users</h1>
+          <p className="text-sm text-gray-600">
+            Assign roles and sites. Managers and inspectors can only see and
+            work with templates/inspections for their assigned sites.
+          </p>
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
+          {error}
+        </div>
+      )}
+
+      {users.length === 0 ? (
+        <div className="rounded-2xl border bg-white p-4 text-sm text-gray-600">
+          No users found.
+        </div>
+      ) : (
+        <div className="rounded-2xl border bg-white overflow-x-auto">
+          <table className="min-w-full text-xs">
+            <thead>
+              <tr className="border-b bg-gray-50">
+                <th className="text-left px-3 py-2 font-semibold text-gray-700">
+                  User
+                </th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-700">
+                  Role
+                </th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-700">
+                  Sites (for managers/inspectors)
+                </th>
+                <th className="text-left px-3 py-2 font-semibold text-gray-700">
+                  Status
+                </th>
+                <th className="text-right px-3 py-2 font-semibold text-gray-700">
+                  Actions
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((u) => {
+                const isRowSaving = savingUserId === u.user_id;
+                const isAdminRole = u.role === "admin";
+
+                return (
+                  <tr key={u.user_id} className="border-t align-top">
+                    <td className="px-3 py-2">
+                      <div className="text-sm font-medium text-gray-900">
+                        {u.name || u.email || "(no name)"}
+                      </div>
+                      <div className="text-[11px] text-gray-500">
+                        {u.email || "No email"}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2">
+                      <select
+                        value={u.role || "inspector"}
+                        onChange={(e) =>
+                          updateUserField(u.user_id, {
+                            role: e.target.value as Role,
+                          })
+                        }
+                        className="border rounded-xl px-2 py-1 text-xs"
+                      >
+                        <option value="admin">Admin</option>
+                        <option value="manager">Manager</option>
+                        <option value="inspector">Inspector</option>
+                      </select>
+                      <p className="text-[10px] text-gray-400 mt-1">
+                        Admins automatically see all sites.
+                      </p>
+                    </td>
+                    <td className="px-3 py-2">
+                      {isAdminRole ? (
+                        <div className="text-[11px] text-gray-500">
+                          Admin – site restrictions are ignored.
+                        </div>
+                      ) : sites.length === 0 ? (
+                        <div className="text-[11px] text-gray-500">
+                          No sites configured.
+                        </div>
+                      ) : (
+                        <div className="flex flex-wrap gap-2 max-w-xs">
+                          {sites.map((s) => {
+                            const checked = u.site_access.includes(s.id);
+                            return (
+                              <label
+                                key={s.id}
+                                className="inline-flex items-center gap-1 border rounded-xl px-2 py-1 text-[11px] cursor-pointer bg-gray-50"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() =>
+                                    toggleSiteForUser(u.user_id, s.id)
+                                  }
+                                />
+                                <span>{s.name}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      <label className="inline-flex items-center gap-1 text-[11px]">
+                        <input
+                          type="checkbox"
+                          checked={u.is_banned}
+                          onChange={(e) =>
+                            updateUserField(u.user_id, {
+                              is_banned: e.target.checked,
+                            })
+                          }
+                        />
+                        <span>{u.is_banned ? "Banned" : "Active"}</span>
+                      </label>
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        onClick={() => handleSaveUser(u.user_id)}
+                        disabled={isRowSaving}
+                        className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50 disabled:opacity-50"
+                      >
+                        {isRowSaving ? "Saving…" : "Save"}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <p className="text-[11px] text-gray-500">
+        Rules summary: Admins see all sites. Managers/inspectors only see
+        templates and inspections for the sites you assign here. Managers can
+        only create templates for their own sites.
+      </p>
+    </div>
   );
 }
