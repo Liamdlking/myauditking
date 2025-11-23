@@ -4,7 +4,7 @@ import jsPDF from "jspdf";
 import { supabase } from "@/utils/supabaseClient";
 
 type Role = "admin" | "manager" | "inspector" | string | null;
-// IMPORTANT: match DB constraint: 'in_progress' | 'submitted'
+// IMPORTANT: must match DB constraint: 'in_progress' | 'submitted'
 type Status = "in_progress" | "submitted";
 
 type QuestionType =
@@ -139,6 +139,7 @@ export default function InspectionsPage() {
           setSiteAccess(null);
           return;
         }
+
         setCurrentUserId(user.id);
 
         const { data, error } = await supabase
@@ -154,13 +155,13 @@ export default function InspectionsPage() {
           setCurrentUserName(data.name || fallbackName);
           setSiteAccess(
             data.site_access === null
-              ? null
+              ? null // null = all sites
               : ((data.site_access as string[]) || [])
           );
         } else {
           setRole("inspector");
           setCurrentUserName(fallbackName);
-          setSiteAccess([]);
+          setSiteAccess([]); // no explicit sites
         }
       } catch {
         setRole("inspector");
@@ -255,13 +256,11 @@ export default function InspectionsPage() {
     return s ? s.name : "Unknown site";
   };
 
-  // Sites the current user can filter by
+  // Sites the current user can filter by in the dropdown
   const visibleSites = useMemo(() => {
     if (!sites.length) return [];
     if (role === "admin") return sites;
-    if (!siteAccess || siteAccess.length === 0) {
-      return []; // user will still see "All sites" option
-    }
+    if (!siteAccess || siteAccess.length === 0) return [];
     return sites.filter((s) => siteAccess.includes(s.id));
   }, [sites, role, siteAccess]);
 
@@ -523,9 +522,7 @@ export default function InspectionsPage() {
 
       const score = computeScore(items);
       const nowIso = new Date().toISOString();
-      const newStatus: Status = markComplete
-        ? "submitted" // store as 'submitted' in DB
-        : "in_progress";
+      const newStatus: Status = markComplete ? "submitted" : "in_progress";
 
       const { error } = await supabase
         .from("inspections")
@@ -1263,16 +1260,15 @@ export default function InspectionsPage() {
                                         value: e.target.value,
                                       })
                                     }
-                                    className="w-full border rounded-xl px-2 py-1 text-xs"
-                                    placeholder="Type your answer…"
+                                    className="w-full border rounded-xl px-3 py-2 min-h-[60px]"
+                                    placeholder="Enter notes / description…"
                                   />
                                 )}
 
-                                {/* Notes */}
                                 {q.allowNotes && (
                                   <div>
                                     <label className="block text-[11px] text-gray-500 mb-1">
-                                      Notes
+                                      Extra notes
                                     </label>
                                     <textarea
                                       value={a.notes || ""}
@@ -1281,73 +1277,55 @@ export default function InspectionsPage() {
                                           notes: e.target.value,
                                         })
                                       }
-                                      className="w-full border rounded-xl px-2 py-1 text-xs"
+                                      className="w-full border rounded-xl px-3 py-1 min-h-[40px]"
                                       placeholder="Optional notes…"
                                     />
                                   </div>
                                 )}
 
-                                {/* Photos */}
                                 {q.allowPhoto && (
                                   <div className="space-y-1">
                                     <label className="block text-[11px] text-gray-500 mb-1">
                                       Photos
                                     </label>
-                                    <div className="flex flex-wrap gap-2">
+                                    <div className="flex flex-wrap gap-2 items-center">
+                                      <label className="inline-flex items-center gap-2 cursor-pointer text-[11px]">
+                                        <span className="px-2 py-1 border rounded-xl bg-white hover:bg-gray-50">
+                                          Add photo
+                                        </span>
+                                        <input
+                                          type="file"
+                                          accept="image/*"
+                                          className="hidden"
+                                          onChange={(e) =>
+                                            handlePhotoChange(
+                                              idx,
+                                              e.target.files
+                                                ? e.target.files[0]
+                                                : null
+                                            )
+                                          }
+                                        />
+                                      </label>
                                       {a.photos.map((p, pIndex) => (
-                                        <div
+                                        <img
                                           key={pIndex}
-                                          className="relative"
-                                        >
-                                          <img
-                                            src={p}
-                                            alt="Photo"
-                                            className="h-16 w-16 object-cover rounded-md border"
-                                          />
-                                          <button
-                                            onClick={() =>
-                                              updateAnswer(idx, {
-                                                photos: a.photos.filter(
-                                                  (_, i) =>
-                                                    i !== pIndex
-                                                ),
-                                              })
-                                            }
-                                            className="absolute -top-2 -right-2 bg-black/70 text-white rounded-full text-[9px] px-1"
-                                          >
-                                            ✕
-                                          </button>
-                                        </div>
+                                          src={p}
+                                          alt="evidence"
+                                          className="h-10 w-10 object-cover rounded-md border bg-gray-100"
+                                        />
                                       ))}
                                     </div>
-
-                                    <label className="inline-flex items-center gap-2 text-[11px] cursor-pointer">
-                                      <span className="px-2 py-1 border rounded-xl bg-white hover:bg-gray-50">
-                                        Add photo
-                                      </span>
-                                      <input
-                                        type="file"
-                                        accept="image/*"
-                                        className="hidden"
-                                        onChange={(e) =>
-                                          handlePhotoChange(
-                                            idx,
-                                            e.target.files
-                                              ? e.target.files[0]
-                                              : null
-                                          )
-                                        }
-                                      />
-                                    </label>
                                   </div>
                                 )}
 
-                                {/* Answered by */}
                                 {a.answered_by_name && (
-                                  <p className="text-[10px] text-gray-400">
+                                  <div className="text-[10px] text-gray-500">
                                     Last answered by:{" "}
-                                    {a.answered_by_name}
-                                  </p>
+                                      <span className="font-medium">
+                                        {a.answered_by_name}
+                                      </span>
+                                  </div>
                                 )}
                               </div>
                             );
@@ -1357,59 +1335,55 @@ export default function InspectionsPage() {
                     ))}
                   </div>
 
-                  {/* Right sidebar */}
-                  <div className="w-full md:w-48 space-y-3">
-                    <button
-                      onClick={() => saveInspection(false)}
-                      disabled={modalSaving}
-                      className="w-full px-3 py-2 rounded-xl bg-gray-200 text-sm hover:bg-gray-300 disabled:opacity-50"
-                    >
-                      Save progress
-                    </button>
+                  {/* Side panel */}
+                  <div className="w-full md:w-64 space-y-3 text-xs">
+                    <div className="border rounded-2xl p-3 bg-gray-50 space-y-1">
+                      <div className="font-semibold text-gray-800">
+                        Summary
+                      </div>
+                      <div className="text-gray-600">
+                        Status:{" "}
+                        <span className="font-medium">
+                          {activeInspection.status === "submitted"
+                            ? "Completed"
+                            : "In progress"}
+                        </span>
+                      </div>
+                      {activeInspection.score !== null && (
+                        <div className="text-gray-600">
+                          Score:{" "}
+                          <span className="font-medium">
+                            {activeInspection.score}%
+                          </span>
+                        </div>
+                      )}
+                    </div>
 
-                    <button
-                      onClick={() => saveInspection(true)}
-                      disabled={modalSaving}
-                      className="w-full px-3 py-2 rounded-xl bg-green-600 text-white text-sm hover:bg-green-700 disabled:opacity-50"
-                    >
-                      Complete inspection
-                    </button>
-
-                    <button
-                      onClick={exportCurrentToPdf}
-                      className="w-full px-3 py-2 rounded-xl border text-sm hover:bg-gray-50"
-                    >
-                      Export PDF
-                    </button>
-
-                    {isAdmin && (
+                    <div className="border rounded-2xl p-3 bg-gray-50 space-y-2">
+                      <div className="font-semibold text-gray-800">
+                        Actions
+                      </div>
                       <button
-                        onClick={async () => {
-                          if (
-                            !confirm(
-                              "Delete this inspection? This cannot be undone."
-                            )
-                          )
-                            return;
-
-                          const { error } = await supabase
-                            .from("inspections")
-                            .delete()
-                            .eq("id", activeInspection.id);
-
-                          if (error) {
-                            alert(error.message);
-                            return;
-                          }
-
-                          await loadInspections();
-                          closeInspectionModal();
-                        }}
-                        className="w-full px-3 py-2 rounded-xl border text-sm text-rose-600 hover:bg-rose-50"
+                        onClick={() => saveInspection(false)}
+                        disabled={modalSaving}
+                        className="w-full px-3 py-2 rounded-xl border bg-white hover:bg-gray-100 disabled:opacity-50"
                       >
-                        Delete
+                        Save progress
                       </button>
-                    )}
+                      <button
+                        onClick={() => saveInspection(true)}
+                        disabled={modalSaving}
+                        className="w-full px-3 py-2 rounded-xl bg-purple-700 text-white hover:bg-purple-800 disabled:opacity-50"
+                      >
+                        Mark as complete
+                      </button>
+                      <button
+                        onClick={exportCurrentToPdf}
+                        className="w-full px-3 py-2 rounded-xl border bg-white hover:bg-gray-100"
+                      >
+                        Download PDF
+                      </button>
+                    </div>
                   </div>
                 </div>
               </>
@@ -1421,9 +1395,19 @@ export default function InspectionsPage() {
   );
 }
 
-// --------------------------------------------------------
-// Inspection row card component
-// --------------------------------------------------------
+// --------------------------
+// Row component
+// --------------------------
+type InspectionRowCardProps = {
+  insp: InspectionRow;
+  siteName: string;
+  selected: boolean;
+  onToggleSelected: () => void;
+  onOpen: () => void;
+  onDeleted: () => void;
+  isAdmin: boolean;
+};
+
 function InspectionRowCard({
   insp,
   siteName,
@@ -1432,58 +1416,84 @@ function InspectionRowCard({
   onOpen,
   onDeleted,
   isAdmin,
-}: {
-  insp: InspectionRow;
-  siteName: string;
-  selected: boolean;
-  onToggleSelected: () => void;
-  onOpen: () => void;
-  onDeleted: () => void;
-  isAdmin: boolean;
-}) {
+}: InspectionRowCardProps) {
+  const deleteOne = async () => {
+    if (!isAdmin) {
+      alert("Only admins can delete inspections.");
+      return;
+    }
+    if (!confirm("Delete this inspection? This cannot be undone.")) {
+      return;
+    }
+    try {
+      const { error } = await supabase
+        .from("inspections")
+        .delete()
+        .eq("id", insp.id);
+      if (error) throw error;
+      onDeleted();
+    } catch (e: any) {
+      console.error("delete inspection error", e);
+      alert(e?.message || "Could not delete inspection.");
+    }
+  };
+
+  const statusLabel =
+    insp.status === "submitted" ? "Completed" : "In progress";
+  const statusColor =
+    insp.status === "submitted"
+      ? "bg-emerald-50 text-emerald-700 border-emerald-100"
+      : "bg-amber-50 text-amber-700 border-amber-100";
+
   return (
-    <div className="border rounded-xl bg-white p-3 flex items-center justify-between gap-3">
-      <div className="flex items-center gap-3">
+    <div className="border rounded-2xl bg-white p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-2 shadow-sm">
+      <div className="flex items-start gap-3 flex-1">
         <input
           type="checkbox"
           checked={selected}
           onChange={onToggleSelected}
+          className="mt-1"
         />
-        <div>
-          <div className="font-medium text-sm text-gray-800">
-            {insp.template_name}
+        <div className="space-y-1 text-sm">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-gray-900">
+              {insp.template_name}
+            </span>
+            <span
+              className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] ${statusColor}`}
+            >
+              {statusLabel}
+            </span>
+            <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-700 px-2 py-0.5 text-[11px]">
+              {siteName}
+            </span>
           </div>
-          <div className="text-[11px] text-gray-500">
-            {siteName} • Started: {formatDateTime(insp.started_at)}
+          <div className="text-[11px] text-gray-500 space-x-2">
+            <span>Started: {formatDateTime(insp.started_at)}</span>
+            {insp.submitted_at && (
+              <span>• Submitted: {formatDateTime(insp.submitted_at)}</span>
+            )}
+            {insp.owner_name && (
+              <span>• Inspector: {insp.owner_name}</span>
+            )}
+            {insp.score !== null && (
+              <span>• Score: {insp.score}%</span>
+            )}
           </div>
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 text-xs">
         <button
           onClick={onOpen}
-          className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
+          className="px-3 py-1 rounded-xl border hover:bg-gray-50"
         >
-          Open
+          {insp.status === "in_progress" ? "Continue" : "View"}
         </button>
-
         {isAdmin && (
           <button
-            onClick={async () => {
-              if (!confirm("Delete this inspection?")) return;
-
-              const { error } = await supabase
-                .from("inspections")
-                .delete()
-                .eq("id", insp.id);
-
-              if (!error) {
-                onDeleted();
-              } else {
-                alert(error.message);
-              }
-            }}
-            className="px-3 py-1 rounded-xl border text-xs text-rose-600 hover:bg-rose-50"
+            onClick={deleteOne}
+            className="px-3 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
           >
             Delete
           </button>
