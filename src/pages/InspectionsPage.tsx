@@ -508,7 +508,55 @@ export default function InspectionsPage() {
       answered_by_name: a.answered_by_name,
     }));
   };
+  const duplicateInspection = async (insp: InspectionRow) => {
+    try {
+      // Get current user so the duplicated inspection belongs to them
+      const { data: userData } = await supabase.auth.getUser();
+      const user = userData?.user;
+      if (!user) {
+        alert("Please log in first.");
+        return;
+      }
 
+      // Optional: load profile for nicer owner_name
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("name")
+        .eq("user_id", user.id)
+        .single();
+
+      const ownerName = profile?.name || user.email || "Inspector";
+
+      // Copy items from the existing inspection (or empty array)
+      const items: InspectionItem[] = insp.items || [];
+
+      // Recompute score based on copied items (or set to null if you prefer)
+      const score = computeScore(items);
+      const nowIso = new Date().toISOString();
+
+      const { error } = await supabase.from("inspections").insert({
+        template_id: insp.template_id,
+        template_name: insp.template_name,
+        site_id: insp.site_id,
+        site: insp.site,
+        status: "in_progress",
+        started_at: nowIso,
+        submitted_at: null,
+        score,
+        items,
+        owner_user_id: user.id,
+        owner_name: ownerName,
+      });
+
+      if (error) throw error;
+
+      await loadInspections();
+      alert("Inspection duplicated. You can now continue it in the list.");
+    } catch (e: any) {
+      console.error("duplicateInspection error", e);
+      alert(e?.message || "Could not duplicate inspection.");
+    }
+  };
   const saveInspection = async (markComplete: boolean) => {
     if (!activeInspection) return;
     setModalSaving(true);
