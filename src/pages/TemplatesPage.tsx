@@ -43,8 +43,8 @@ export default function TemplatesPage() {
   const isManager = role === "manager";
   const canEdit = isAdmin || isManager;
 
-  // --------------------------
-  // Load current user + role + site_access
+    // --------------------------
+  // Load current user + role + site access (from user_sites)
   // --------------------------
   useEffect(() => {
     const loadUser = async () => {
@@ -59,22 +59,36 @@ export default function TemplatesPage() {
         }
         setCurrentUserId(user.id);
 
+        // 1) Role from profiles
         const { data: profile, error: profileError } = await supabase
           .from("profiles")
-          .select("role, site_access")
+          .select("role")
           .eq("user_id", user.id)
           .single();
 
-        if (!profileError && profile) {
-          setRole((profile.role as Role) || "inspector");
-          setSiteAccess(
-            profile.site_access === null
-              ? null
-              : ((profile.site_access as string[]) || [])
-          );
+        const r: Role =
+          !profileError && profile?.role
+            ? (profile.role as Role)
+            : "inspector";
+        setRole(r);
+
+        // 2) Site access from user_sites (admin sees all sites)
+        if (r === "admin") {
+          setSiteAccess(null);
         } else {
-          setRole("inspector");
-          setSiteAccess([]);
+          const { data: userSites, error: userSitesErr } = await supabase
+            .from("user_sites")
+            .select("site_id")
+            .eq("user_id", user.id);
+
+          if (userSitesErr) {
+            console.error("load user_sites error", userSitesErr);
+            setSiteAccess([]);
+          } else {
+            setSiteAccess(
+              (userSites || []).map((row: any) => row.site_id as string)
+            );
+          }
         }
       } catch (e) {
         console.error("loadUser error", e);
@@ -165,8 +179,35 @@ export default function TemplatesPage() {
   }, [sites, role, siteAccess]);
 
   // Apply access rules + filters to templates
-  const filteredTemplates = useMemo(() => {
-    let list = [...templates];
+    const filteredTemplates = useMemo(() => {
+    return templates.filter((tpl) => {
+      // Site-level access: non-admins only see templates for their sites (or global / no site)
+      if (role !== "admin") {
+        const allowed = siteAccess || [];
+        if (tpl.site_id) {
+          if (!allowed.includes(tpl.site_id)) {
+            return false;
+          }
+        }
+        // if tpl.site_id is null => global, allowed
+      }
+
+      // Site filter dropdown
+      if (selectedSiteId !== "all" && tpl.site_id !== selectedSiteId) {
+        return false;
+      }
+
+      // Published filter
+      if (publishedFilter === "published" && !tpl.is_published) {
+        return false;
+      }
+      if (publishedFilter === "unpublished" && tpl.is_published) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [templates, role, siteAccess, selectedSiteId, publishedFilter]);
 
     // 1) Access control via site_access
     if (role !== "admin") {
