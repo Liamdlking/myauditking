@@ -188,6 +188,8 @@ export default function InspectionsPage() {
 
     loadUserRole();
   }, []);
+  const isAdmin = role === "admin";
+  const isManager = role === "manager";
   // --------------------------
   // Load sites
   // --------------------------
