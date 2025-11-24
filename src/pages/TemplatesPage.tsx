@@ -28,6 +28,7 @@ export default function TemplatesPage() {
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
   const [sites, setSites] = useState<SiteRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [roleLoading, setRoleLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const [selectedSiteId, setSelectedSiteId] = useState<string>("all");
@@ -39,15 +40,12 @@ export default function TemplatesPage() {
 
   const navigate = useNavigate();
 
-  const isAdmin = role === "admin";
-  const isManager = role === "manager";
-  const canEdit = isAdmin || isManager;
-
-    // --------------------------
+  // --------------------------
   // Load current user + role + site access (from user_sites)
   // --------------------------
   useEffect(() => {
     const loadUser = async () => {
+      setRoleLoading(true);
       try {
         const { data: userData } = await supabase.auth.getUser();
         const user = userData?.user;
@@ -59,46 +57,48 @@ export default function TemplatesPage() {
         }
         setCurrentUserId(user.id);
 
-        // 1) Role from profiles
+        // Role from profiles
         const { data: profile, error: profileError } = await supabase
           .from("profiles")
           .select("role")
           .eq("user_id", user.id)
           .single();
 
-        const r: Role =
-          !profileError && profile?.role
-            ? (profile.role as Role)
-            : "inspector";
-        setRole(r);
-
-        // 2) Site access from user_sites (admin sees all sites)
-        if (r === "admin") {
-          setSiteAccess(null);
+        if (!profileError && profile) {
+          setRole((profile.role as Role) || "inspector");
         } else {
-          const { data: userSites, error: userSitesErr } = await supabase
-            .from("user_sites")
-            .select("site_id")
-            .eq("user_id", user.id);
+          setRole("inspector");
+        }
 
-          if (userSitesErr) {
-            console.error("load user_sites error", userSitesErr);
-            setSiteAccess([]);
-          } else {
-            setSiteAccess(
-              (userSites || []).map((row: any) => row.site_id as string)
-            );
-          }
+        // Site access from user_sites
+        const { data: usites, error: usitesErr } = await supabase
+          .from("user_sites")
+          .select("site_id")
+          .eq("user_id", user.id);
+
+        if (!usitesErr && usites) {
+          const ids = usites
+            .map((r: any) => r.site_id)
+            .filter((id: any) => !!id);
+          setSiteAccess(ids);
+        } else {
+          setSiteAccess([]);
         }
       } catch (e) {
         console.error("loadUser error", e);
         setRole("inspector");
         setSiteAccess([]);
+      } finally {
+        setRoleLoading(false);
       }
     };
 
     loadUser();
   }, []);
+
+  const isAdmin = role === "admin";
+  const isManager = role === "manager";
+  const canEdit = isAdmin || isManager;
 
   // --------------------------
   // Load sites + templates
@@ -168,64 +168,37 @@ export default function TemplatesPage() {
     return s ? s.name : "Unknown site";
   };
 
-  // Sites the current user is allowed to see in the filter
+  // Sites the current user can filter by
   const visibleSites = useMemo(() => {
     if (!sites.length) return [];
-    if (role === "admin") return sites;
+    if (isAdmin) return sites;
     if (!siteAccess || siteAccess.length === 0) {
-      return []; // they’ll still see “All sites” (for global templates)
+      return [];
     }
     return sites.filter((s) => siteAccess.includes(s.id));
-  }, [sites, role, siteAccess]);
+  }, [sites, isAdmin, siteAccess]);
 
-  // Apply access rules + filters to templates
-    const filteredTemplates = useMemo(() => {
-    return templates.filter((tpl) => {
-      // Site-level access: non-admins only see templates for their sites (or global / no site)
-      if (role !== "admin") {
-        const allowed = siteAccess || [];
-        if (tpl.site_id) {
-          if (!allowed.includes(tpl.site_id)) {
-            return false;
-          }
-        }
-        // if tpl.site_id is null => global, allowed
-      }
+  // Templates filtered by:
+  // - site access (for non-admins)
+  // - selected site
+  // - published filter
+  const filteredTemplates = useMemo(() => {
+    let list = [...templates];
 
-      // Site filter dropdown
-      if (selectedSiteId !== "all" && tpl.site_id !== selectedSiteId) {
-        return false;
-      }
-
-      // Published filter
-      if (publishedFilter === "published" && !tpl.is_published) {
-        return false;
-      }
-      if (publishedFilter === "unpublished" && tpl.is_published) {
-        return false;
-      }
-
-      return true;
-    });
-  }, [templates, role, siteAccess, selectedSiteId, publishedFilter]);
-
-    // 1) Access control via site_access
-    if (role !== "admin") {
+    // Access control by site_access
+    if (!isAdmin) {
       const allowed = siteAccess || [];
       list = list.filter((tpl) => {
-        // global template – visible to everyone
+        // Global templates (no site) visible to everyone
         if (!tpl.site_id) return true;
-        // otherwise must be in site_access
         return allowed.includes(tpl.site_id);
       });
     }
 
-    // 2) Site filter
     if (selectedSiteId !== "all") {
       list = list.filter((tpl) => tpl.site_id === selectedSiteId);
     }
 
-    // 3) Published filter
     if (publishedFilter === "published") {
       list = list.filter((tpl) => tpl.is_published);
     } else if (publishedFilter === "unpublished") {
@@ -233,7 +206,7 @@ export default function TemplatesPage() {
     }
 
     return list;
-  }, [templates, role, siteAccess, selectedSiteId, publishedFilter]);
+  }, [templates, isAdmin, siteAccess, selectedSiteId, publishedFilter]);
 
   // --------------------------
   // Actions
@@ -279,8 +252,8 @@ export default function TemplatesPage() {
   };
 
   const handleDeleteTemplate = async (tpl: TemplateRow) => {
-    if (!canEdit) {
-      alert("Only managers/admins can delete templates.");
+    if (!isAdmin) {
+      alert("Only admins can delete templates.");
       return;
     }
     if (
@@ -290,16 +263,13 @@ export default function TemplatesPage() {
     ) {
       return;
     }
-
     try {
       const { error } = await supabase
         .from("templates")
         .delete()
         .eq("id", tpl.id);
-
       if (error) throw error;
       setTemplates((prev) => prev.filter((t) => t.id !== tpl.id));
-      alert("Template deleted.");
     } catch (e: any) {
       console.error("delete template error", e);
       alert(e?.message || "Could not delete template.");
@@ -323,33 +293,30 @@ export default function TemplatesPage() {
         .single();
 
       const ownerName = profile?.name || user.email || "Inspector";
-
       const nowIso = new Date().toISOString();
 
-      const { error } = await supabase
-        .from("inspections")
-        .insert({
-          template_id: tpl.id,
-          template_name: tpl.name,
-          site_id: tpl.site_id,
-          site: siteNameFor(tpl.site_id),
-          status: "in_progress",
-          started_at: nowIso,
-          submitted_at: null,
-          score: null,
-          items: null,
-          owner_user_id: user.id,
-          owner_name: ownerName,
-        });
+      const { error } = await supabase.from("inspections").insert({
+        template_id: tpl.id,
+        template_name: tpl.name,
+        site_id: tpl.site_id,
+        site: siteNameFor(tpl.site_id),
+        status: "in_progress",
+        started_at: nowIso,
+        submitted_at: null,
+        score: null,
+        items: null,
+        owner_user_id: user.id,
+        owner_name: ownerName,
+      });
 
       if (error) throw error;
 
-      // Go to inspections page; user can open + complete it there
       navigate("/inspections");
     } catch (e: any) {
       console.error("startInspection error", e);
       alert(
-        e?.message || "Could not start inspection. Check the inspections table."
+        e?.message ||
+          "Could not start inspection. Check the inspections table."
       );
     }
   };
@@ -369,15 +336,17 @@ export default function TemplatesPage() {
             Create, import and manage templates. Start inspections from
             any template.
           </p>
-          {role && (
+          {!roleLoading && role && (
             <p className="text-[11px] text-gray-400 mt-1">
-              Your role: <span className="font-medium">{role}</span>
+              {role === "admin"
+                ? "You can see templates for all sites."
+                : "You see templates for the sites assigned to you."}
             </p>
           )}
         </div>
 
         <div className="flex flex-wrap gap-2 justify-end">
-          {(isAdmin || isManager) && (
+          {canEdit && (
             <>
               <button
                 onClick={() => setShowImportModal(true)}
@@ -440,11 +409,11 @@ export default function TemplatesPage() {
       )}
 
       {loading ? (
-        <div className="rounded-2xl border bg-white p-4 text-sm text-gray-600">
+        <div className="rounded-xl border bg-white p-4 text-sm text-gray-600">
           Loading templates…
         </div>
       ) : filteredTemplates.length === 0 ? (
-        <div className="rounded-2xl border bg-white p-4 text-sm text-gray-600">
+        <div className="rounded-xl border bg-white p-4 text-sm text-gray-600">
           No templates found for the current filters.
         </div>
       ) : (
@@ -489,7 +458,7 @@ export default function TemplatesPage() {
                 </p>
               )}
 
-              <div className="flex flex-wrap gap-2 text-xs">
+              <div className="flex gap-2 text-xs">
                 <button
                   onClick={() => handleStartInspection(tpl)}
                   className="flex-1 px-3 py-1 rounded-xl border hover:bg-gray-50"
@@ -510,13 +479,15 @@ export default function TemplatesPage() {
                     >
                       {tpl.is_published ? "Unpublish" : "Publish"}
                     </button>
-                    <button
-                      onClick={() => handleDeleteTemplate(tpl)}
-                      className="px-3 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
-                    >
-                      Delete
-                    </button>
                   </>
+                )}
+                {isAdmin && (
+                  <button
+                    onClick={() => handleDeleteTemplate(tpl)}
+                    className="px-3 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
+                  >
+                    Delete
+                  </button>
                 )}
               </div>
             </div>
