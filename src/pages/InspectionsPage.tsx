@@ -676,7 +676,7 @@ export default function InspectionsPage() {
     }
 
     for (const section of activeDefinition.sections || []) {
-      // TITLE BLOCKS: purple-style heading in PDF too (optional)
+      // TITLE BLOCKS: render as bold heading in PDF
       if (section.is_title) {
         if (y > pageHeight - 20) {
           doc.addPage();
@@ -1140,7 +1140,7 @@ export default function InspectionsPage() {
         </div>
       )}
 
-            {/* Modal */}
+      {/* Modal */}
       {modalOpen && activeInspection && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
           <div className="w-full max-w-5xl max-h-[90vh] overflow-auto rounded-2xl bg-white shadow-xl p-5 space-y-4">
@@ -1152,7 +1152,7 @@ export default function InspectionsPage() {
               </div>
             ) : (
               <>
-                {/* Header (can scroll off) */}
+                {/* Header */}
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-start gap-3">
                     {templateLogo && (
@@ -1445,7 +1445,7 @@ export default function InspectionsPage() {
                     })}
                   </div>
 
-                  {/* Right: sticky action panel (Close + Save + Complete + PDF) */}
+                  {/* Right: sticky action panel */}
                   <div className="w-full md:w-64 md:flex-shrink-0">
                     <div className="sticky top-2 space-y-3 border rounded-2xl bg-gray-50 p-3 text-xs">
                       <div className="space-y-1">
@@ -1517,17 +1517,21 @@ export default function InspectionsPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
 
-// ---------------------------------------
+// --------------------------------------------------------
 // Row card component
-// ---------------------------------------
+// --------------------------------------------------------
+
 type InspectionRowCardProps = {
   insp: InspectionRow;
   siteName: string;
   selected: boolean;
   onToggleSelected: () => void;
   onOpen: () => void;
-  onDeleted: () => Promise<void> | void;
+  onDeleted: () => void;
   canDuplicate: boolean;
   onDuplicate: () => void;
   isAdmin: boolean;
@@ -1545,33 +1549,28 @@ function InspectionRowCard({
   isAdmin,
 }: InspectionRowCardProps) {
   const handleDelete = async () => {
-    if (!isAdmin) return;
-    if (
-      !window.confirm(
-        "Delete this inspection? This cannot be undone."
-      )
-    ) {
+    if (!isAdmin) {
+      alert("Only admins can delete inspections.");
       return;
     }
-
+    if (!window.confirm("Delete this inspection? This cannot be undone.")) {
+      return;
+    }
     try {
       const { error } = await supabase
         .from("inspections")
         .delete()
         .eq("id", insp.id);
       if (error) throw error;
-      await onDeleted();
+      onDeleted();
     } catch (e: any) {
-      console.error("delete single inspection error", e);
+      console.error("delete inspection error", e);
       alert(e?.message || "Could not delete inspection.");
     }
   };
 
-  const statusLabel =
-    insp.status === "in_progress" ? "In progress" : "Completed";
-
   return (
-    <div className="rounded-2xl border bg-white p-3 flex flex-col md:flex-row md:items-center gap-3 text-xs">
+    <div className="border rounded-2xl bg-white p-3 flex flex-col md:flex-row md:items-center gap-3 text-xs">
       <div className="flex items-start gap-3 flex-1">
         <label className="mt-1">
           <input
@@ -1585,26 +1584,22 @@ function InspectionRowCard({
             <div className="text-sm font-semibold text-gray-900">
               {insp.template_name}
             </div>
-            <span
-              className={`px-2 py-0.5 rounded-full text-[10px] border ${
-                insp.status === "in_progress"
-                  ? "bg-amber-50 border-amber-200 text-amber-700"
-                  : "bg-emerald-50 border-emerald-200 text-emerald-700"
-              }`}
-            >
-              {statusLabel}
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] bg-gray-50 border text-gray-700">
+              {insp.status === "in_progress" ? "In progress" : "Completed"}
             </span>
             {insp.score !== null && (
-              <span className="px-2 py-0.5 rounded-full text-[10px] bg-purple-50 border border-purple-200 text-purple-700">
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] bg-purple-50 border border-purple-200 text-purple-700">
                 Score: {insp.score}%
               </span>
             )}
           </div>
-          <div className="text-[11px] text-gray-500 space-x-2">
-            <span>Site: {siteName}</span>
-            <span>• Started: {formatDateTime(insp.started_at)}</span>
+          <div className="text-[11px] text-gray-500">
+            Site: {siteName} • Started: {formatDateTime(insp.started_at)}
             {insp.submitted_at && (
-              <span>• Completed: {formatDateTime(insp.submitted_at)}</span>
+              <>
+                {" "}
+                • Completed: {formatDateTime(insp.submitted_at)}
+              </>
             )}
           </div>
           {insp.owner_name && (
@@ -1615,7 +1610,7 @@ function InspectionRowCard({
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-2 justify-end">
+      <div className="flex items-center gap-2 md:flex-col md:items-end">
         <button
           onClick={onOpen}
           className="px-3 py-1.5 rounded-xl border text-xs hover:bg-gray-50"
