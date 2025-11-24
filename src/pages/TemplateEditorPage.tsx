@@ -1,3 +1,4 @@
+// src/pages/TemplateEditorPage.tsx
 import React, { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { supabase } from "@/utils/supabaseClient";
@@ -19,6 +20,7 @@ type TemplateQuestion = {
 type TemplateSection = {
   id: string;
   title: string;
+  is_title?: boolean; // true = title-only block (no questions)
   image_data_url?: string | null;
   questions: TemplateQuestion[];
 };
@@ -143,9 +145,33 @@ export default function TemplateEditorPage({ mode }: Props) {
           setIsPublished(!!tpl.is_published);
           setLogoDataUrl(tpl.logo_data_url || null);
 
-          const def: TemplateDefinition =
-            (tpl.definition as TemplateDefinition) || { sections: [] };
-          setSections(def.sections || []);
+          const def = (tpl.definition as TemplateDefinition) || {
+            sections: [],
+          };
+
+          // Backwards compatibility: ensure sections array
+          const loadedSections: TemplateSection[] = (def.sections || []).map(
+            (s: any) => ({
+              id: s.id || randomId("sec"),
+              title: s.title || "",
+              is_title: s.is_title || false,
+              image_data_url: s.image_data_url || null,
+              questions: (s.questions || []).map((q: any) => ({
+                id: q.id || randomId("q"),
+                label: q.label || "",
+                type: q.type || "yes_no_na",
+                options: q.options || [],
+                allowNotes:
+                  typeof q.allowNotes === "boolean" ? q.allowNotes : true,
+                allowPhoto:
+                  typeof q.allowPhoto === "boolean" ? q.allowPhoto : true,
+                required:
+                  typeof q.required === "boolean" ? q.required : false,
+              })),
+            })
+          );
+
+          setSections(loadedSections);
         } else {
           // fresh create mode: one starter section
           setName("New template");
@@ -157,6 +183,7 @@ export default function TemplateEditorPage({ mode }: Props) {
             {
               id: randomId("sec"),
               title: "Section 1",
+              is_title: false,
               image_data_url: null,
               questions: [
                 {
@@ -194,28 +221,49 @@ export default function TemplateEditorPage({ mode }: Props) {
     );
   };
 
-  // Insert a new section at a specific index
-  const insertSectionAt = (index: number, initialTitle?: string) => {
-    setSections((prev) => {
-      const newSection: TemplateSection = {
+  const addSectionAtEnd = () => {
+    setSections((prev) => [
+      ...prev,
+      {
         id: randomId("sec"),
-        title: initialTitle || `Section ${index + 1}`,
+        title: `Section ${prev.filter((s) => !s.is_title).length + 1}`,
+        is_title: false,
         image_data_url: null,
         questions: [],
-      };
+      },
+    ]);
+  };
+
+  const insertBlockAfter = (index: number, kind: "title" | "section") => {
+    setSections((prev) => {
       const next = [...prev];
-      next.splice(index, 0, newSection);
+
+      if (kind === "title") {
+        const newTitle: TemplateSection = {
+          id: randomId("title"),
+          title: "New title",
+          is_title: true,
+          image_data_url: null,
+          questions: [],
+        };
+        next.splice(index + 1, 0, newTitle);
+      } else {
+        const newSection: TemplateSection = {
+          id: randomId("sec"),
+          title: `Section ${prev.filter((s) => !s.is_title).length + 1}`,
+          is_title: false,
+          image_data_url: null,
+          questions: [],
+        };
+        next.splice(index + 1, 0, newSection);
+      }
+
       return next;
     });
   };
 
-  // Original "Add section" now just appends at the end
-  const addSection = () => {
-    insertSectionAt(sections.length);
-  };
-
   const removeSection = (sectionId: string) => {
-    if (!window.confirm("Remove this section?")) return;
+    if (!window.confirm("Remove this block? (title or section)")) return;
     setSections((prev) => prev.filter((s) => s.id !== sectionId));
   };
 
@@ -315,14 +363,18 @@ export default function TemplateEditorPage({ mode }: Props) {
     const cleanedSections: TemplateSection[] = sections.map((s) => ({
       ...s,
       title: s.title || "",
-      questions: s.questions.map((q) => ({
-        ...q,
-        label: q.label || "",
-        options:
-          q.type === "multiple_choice"
-            ? (q.options || []).map((o) => o.trim()).filter(Boolean)
-            : [],
-      })),
+      questions: s.is_title
+        ? [] // title-only blocks have no questions
+        : s.questions.map((q) => ({
+            ...q,
+            label: q.label || "",
+            options:
+              q.type === "multiple_choice"
+                ? (q.options || [])
+                    .map((o) => o.trim())
+                    .filter(Boolean)
+                : [],
+          })),
     }));
 
     const definition: TemplateDefinition = {
@@ -395,7 +447,7 @@ export default function TemplateEditorPage({ mode }: Props) {
 
   if (notFound) {
     return (
-      <div className="max-w-5xl mx_auto py-6">
+      <div className="max-w-5xl mx-auto py-6">
         <div className="rounded-2xl border bg-white p-4 text-sm text-gray-600">
           Template not found.
         </div>
@@ -411,7 +463,7 @@ export default function TemplateEditorPage({ mode }: Props) {
             {mode === "edit" ? "Edit template" : "New template"}
           </h1>
           <p className="text-sm text-gray-600">
-            Configure sections, questions, notes, photos and logo.
+            Configure sections, titles, questions, notes, photos and logo.
           </p>
         </div>
         <div className="flex gap-2">
@@ -544,23 +596,108 @@ export default function TemplateEditorPage({ mode }: Props) {
           <div className="text-sm font-semibold text-gray-800">
             Sections & questions
           </div>
-          <button
-            onClick={addSection}
-            className="px-3 py-1.5 rounded-xl border text-xs hover:bg-gray-50"
-          >
-            + Add section at end
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() =>
+                setSections((prev) => [
+                  {
+                    id: randomId("title"),
+                    title: "New title",
+                    is_title: true,
+                    image_data_url: null,
+                    questions: [],
+                  },
+                  ...prev,
+                ])
+              }
+              className="px-3 py-1.5 rounded-xl border text-xs hover:bg-gray-50"
+            >
+              + Add title at top
+            </button>
+            <button
+              onClick={addSectionAtEnd}
+              className="px-3 py-1.5 rounded-xl border text-xs hover:bg-gray-50"
+            >
+              + Add section at end
+            </button>
+          </div>
         </div>
 
         {sections.length === 0 ? (
           <div className="rounded-2xl border bg-white p-4 text-xs text-gray-600">
-            No sections yet. Add one to start building your template.
+            No sections yet. Add a title or section to start building your
+            template.
           </div>
         ) : (
           <div className="space-y-3">
-            {sections.map((section, idx) => (
-              <React.Fragment key={section.id}>
-                <div className="rounded-2xl border bg-white p-4 space-y-3">
+            {sections.map((section, index) => {
+              const isTitle = !!section.is_title;
+
+              if (isTitle) {
+                // Title-only block with purple gradient accent (Option D)
+                return (
+                  <div
+                    key={section.id}
+                    className="rounded-2xl border bg-white p-3 space-y-2"
+                  >
+                    <div className="bg-gradient-to-r from-purple-100 to-purple-50 border border-purple-200 rounded-xl px-3 py-2 flex items-center justify-between gap-3">
+                      <div className="flex-1 space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] uppercase tracking-wide text-purple-500 font-semibold">
+                            Title
+                          </span>
+                          <span className="text-[10px] text-purple-400">
+                            Visual separator — no questions
+                          </span>
+                        </div>
+                        <input
+                          value={section.title}
+                          onChange={(e) =>
+                            updateSection(section.id, {
+                              title: e.target.value,
+                            })
+                          }
+                          className="w-full bg-transparent border-none focus:outline-none focus:ring-0 text-sm font-semibold text-purple-900 placeholder:text-purple-400"
+                          placeholder="e.g. Fire Safety Checks"
+                        />
+                      </div>
+                      <button
+                        onClick={() => removeSection(section.id)}
+                        className="text-[11px] text-purple-700 hover:text-purple-900 hover:underline flex-shrink-0"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-[11px] text-gray-500 px-1">
+                      <span>
+                        Use titles to group related sections (they will appear
+                        as headings in inspections and PDFs).
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-[11px] pt-1 border-t border-dashed border-purple-100 mt-2">
+                      <button
+                        onClick={() => insertBlockAfter(index, "title")}
+                        className="px-2 py-1 rounded-xl border border-purple-100 bg-purple-50 text-purple-700 hover:bg-purple-100"
+                      >
+                        + Add title below
+                      </button>
+                      <button
+                        onClick={() => insertBlockAfter(index, "section")}
+                        className="px-2 py-1 rounded-xl border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                      >
+                        + Add section below
+                      </button>
+                    </div>
+                  </div>
+                );
+              }
+
+              // Normal section with questions
+              return (
+                <div
+                  key={section.id}
+                  className="rounded-2xl border bg-white p-4 space-y-3"
+                >
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 space-y-2">
                       <div>
@@ -575,7 +712,7 @@ export default function TemplateEditorPage({ mode }: Props) {
                             })
                           }
                           className="w-full border rounded-xl px-3 py-2 text-sm"
-                          placeholder="E.g. Housekeeping / Title row"
+                          placeholder="E.g. Housekeeping"
                         />
                       </div>
                       <div className="flex items-center gap-3">
@@ -599,9 +736,7 @@ export default function TemplateEditorPage({ mode }: Props) {
                             onChange={(e) =>
                               handleSectionImage(
                                 section.id,
-                                e.target.files
-                                  ? e.target.files[0]
-                                  : null
+                                e.target.files ? e.target.files[0] : null
                               )
                             }
                           />
@@ -651,8 +786,7 @@ export default function TemplateEditorPage({ mode }: Props) {
                   <div className="space-y-2">
                     {section.questions.length === 0 ? (
                       <div className="border rounded-xl bg-gray-50 p-3 text-[11px] text-gray-500">
-                        No questions in this section yet. You can leave it
-                        empty if you just want a title/header.
+                        No questions in this section yet.
                       </div>
                     ) : (
                       section.questions.map((q) => (
@@ -770,27 +904,25 @@ export default function TemplateEditorPage({ mode }: Props) {
                       ))
                     )}
                   </div>
-                </div>
 
-                {/* Insert controls between sections */}
-                <div className="flex justify-center gap-2 text-[11px]">
-                  <button
-                    onClick={() =>
-                      insertSectionAt(idx + 1, "Title")
-                    }
-                    className="px-3 py-1 rounded-xl border bg-white hover:bg-gray-50"
-                  >
-                    + Add title here
-                  </button>
-                  <button
-                    onClick={() => insertSectionAt(idx + 1)}
-                    className="px-3 py-1 rounded-xl border bg-white hover:bg-gray-50"
-                  >
-                    + Add section here
-                  </button>
+                  {/* Between-block controls under each section */}
+                  <div className="flex flex-wrap gap-2 text-[11px] pt-2 border-t border-dashed border-gray-200 mt-1">
+                    <button
+                      onClick={() => insertBlockAfter(index, "title")}
+                      className="px-2 py-1 rounded-xl border border-purple-100 bg-purple-50 text-purple-700 hover:bg-purple-100"
+                    >
+                      + Add title below
+                    </button>
+                    <button
+                      onClick={() => insertBlockAfter(index, "section")}
+                      className="px-2 py-1 rounded-xl border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                    >
+                      + Add section below
+                    </button>
+                  </div>
                 </div>
-              </React.Fragment>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
