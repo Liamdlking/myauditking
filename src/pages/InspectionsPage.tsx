@@ -149,9 +149,10 @@ export default function InspectionsPage() {
 
         const fallbackName = user.email || "Inspector";
 
-        const r: Role = !profileErr && profile
-          ? ((profile.role as Role) || "inspector")
-          : "inspector";
+        const r: Role =
+          !profileErr && profile
+            ? ((profile.role as Role) || "inspector")
+            : "inspector";
         setRole(r);
         setCurrentUserName(profile?.name || fallbackName);
 
@@ -1071,7 +1072,7 @@ export default function InspectionsPage() {
           Loading inspections…
         </div>
       ) : filteredInspections.length === 0 ? (
-        <div className="rounded-xl border bg-white p-4 text-sm text-gray-600">
+        <div className="rounded-2xl border bg-white p-4 text-sm text-gray-600">
           No inspections found.
         </div>
       ) : (
@@ -1131,6 +1132,7 @@ export default function InspectionsPage() {
       {/* Modal */}
       {modalOpen && activeInspection && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          {/* this container scrolls; sticky footer lives inside it */}
           <div className="w-full max-w-5xl max-h-[90vh] overflow-auto rounded-2xl bg-white shadow-xl p-5 space-y-4">
             {modalLoading ? (
               <div className="text-sm text-gray-600">Loading…</div>
@@ -1167,7 +1169,8 @@ export default function InspectionsPage() {
                   </button>
                 </div>
 
-                <div className="flex flex-col md:flex-row gap-4">
+                {/* Questions */}
+                <div className="flex flex-col md:flex-row gap-4 pb-16">
                   <div className="flex-1 space-y-3">
                     {activeDefinition.sections.map((section) => (
                       <div
@@ -1255,7 +1258,7 @@ export default function InspectionsPage() {
                                   </div>
                                 )}
 
-                                                               {q.type === "good_fair_poor" && (
+                                {q.type === "good_fair_poor" && (
                                   <div className="flex flex-wrap gap-3">
                                     {[
                                       { key: "good", label: "Good" },
@@ -1269,7 +1272,9 @@ export default function InspectionsPage() {
                                         <input
                                           type="radio"
                                           name={`${section.id}-${q.id}`}
-                                          checked={a.choice_key === opt.key}
+                                          checked={
+                                            a.choice_key === opt.key
+                                          }
                                           onChange={() =>
                                             updateAnswer(idx, {
                                               choice_key: opt.key,
@@ -1294,7 +1299,9 @@ export default function InspectionsPage() {
                                         <input
                                           type="radio"
                                           name={`${section.id}-${q.id}`}
-                                          checked={a.choice_label === opt}
+                                          checked={
+                                            a.choice_label === opt
+                                          }
                                           onChange={() =>
                                             updateAnswer(idx, {
                                               choice_key: opt,
@@ -1325,7 +1332,7 @@ export default function InspectionsPage() {
                                 {/* Notes */}
                                 {q.allowNotes && (
                                   <div>
-                                    <label className="block text-[11px] text-gray-500 mb-1">
+                                    <label className="block text-[10px] text-gray-500 mb-1">
                                       Notes
                                     </label>
                                     <textarea
@@ -1336,7 +1343,7 @@ export default function InspectionsPage() {
                                         })
                                       }
                                       className="w-full border rounded-xl px-2 py-1 text-xs"
-                                      placeholder="Add extra details…"
+                                      placeholder="Optional notes…"
                                     />
                                   </div>
                                 )}
@@ -1344,12 +1351,22 @@ export default function InspectionsPage() {
                                 {/* Photos */}
                                 {q.allowPhoto && (
                                   <div className="space-y-1">
-                                    <label className="block text-[11px] text-gray-500">
-                                      Photos
+                                    <label className="block text-[10px] text-gray-500">
+                                      Photos ({a.photos.length})
                                     </label>
-                                    <div className="flex flex-wrap gap-2 items-center">
-                                      <label className="inline-flex items-center gap-1 text-[11px] cursor-pointer border rounded-xl px-2 py-1 bg-gray-50">
-                                        <span>Upload photo</span>
+                                    <div className="flex flex-wrap gap-2">
+                                      {a.photos.map((p, i) => (
+                                        <img
+                                          key={i}
+                                          src={p}
+                                          alt={`Photo ${i + 1}`}
+                                          className="h-12 w-12 object-cover rounded border"
+                                        />
+                                      ))}
+                                      <label className="inline-flex items-center gap-1 text-[11px] cursor-pointer">
+                                        <span className="px-2 py-1 border rounded-xl bg-gray-50 hover:bg-gray-100">
+                                          Upload
+                                        </span>
                                         <input
                                           type="file"
                                           accept="image/*"
@@ -1364,34 +1381,16 @@ export default function InspectionsPage() {
                                           }
                                         />
                                       </label>
-                                      {a.photos && a.photos.length > 0 && (
-                                        <span className="text-[10px] text-gray-500">
-                                          {a.photos.length} photo
-                                          {a.photos.length === 1 ? "" : "s"}{" "}
-                                          attached
-                                        </span>
-                                      )}
                                     </div>
-                                    {a.photos && a.photos.length > 0 && (
-                                      <div className="flex flex-wrap gap-2 mt-1">
-                                        {a.photos.map((p, i) => (
-                                          <img
-                                            key={i}
-                                            src={p}
-                                            alt={`photo-${i + 1}`}
-                                            className="h-10 w-10 object-cover rounded-md border bg-gray-100"
-                                          />
-                                        ))}
-                                      </div>
-                                    )}
                                   </div>
                                 )}
 
                                 {/* Answered by */}
                                 {a.answered_by_name && (
-                                  <div className="text-[10px] text-gray-400">
-                                    Last answered by: {a.answered_by_name}
-                                  </div>
+                                  <p className="text-[10px] text-gray-400">
+                                    Last answered by:{" "}
+                                    {a.answered_by_name}
+                                  </p>
                                 )}
                               </div>
                             );
@@ -1400,52 +1399,32 @@ export default function InspectionsPage() {
                       </div>
                     ))}
                   </div>
+                </div>
 
-                  {/* Right sidebar actions */}
-                  <div className="w-full md:w-56 space-y-3">
-                    <div className="border rounded-2xl bg-gray-50 p-3 text-xs space-y-2">
-                      <div className="font-semibold text-gray-800">
-                        Inspection status
-                      </div>
-                      <div className="text-[11px] text-gray-500">
-                        Current:{" "}
-                        {activeInspection.status === "submitted"
-                          ? "Completed"
-                          : "In progress"}
-                      </div>
-                      {activeInspection.score !== null && (
-                        <div className="text-[11px] text-gray-500">
-                          Score:{" "}
-                          <span className="font-semibold">
-                            {activeInspection.score}%
-                          </span>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="border rounded-2xl bg-gray-50 p-3 text-xs space-y-2">
-                      <button
-                        onClick={() => saveInspection(false)}
-                        disabled={modalSaving}
-                        className="w-full px-3 py-2 rounded-xl bg-purple-700 text-white text-xs hover:bg-purple-800 disabled:opacity-50"
-                      >
-                        {modalSaving ? "Saving…" : "Save in progress"}
-                      </button>
-                      <button
-                        onClick={() => saveInspection(true)}
-                        disabled={modalSaving}
-                        className="w-full px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs hover:bg-emerald-700 disabled:opacity-50"
-                      >
-                        {modalSaving ? "Saving…" : "Complete inspection"}
-                      </button>
-                      <button
-                        onClick={exportCurrentToPdf}
-                        className="w-full px-3 py-2 rounded-xl border text-xs hover:bg-gray-50"
-                      >
-                        Download PDF
-                      </button>
-                    </div>
+                {/* Sticky footer inside modal */}
+                <div className="sticky bottom-0 left-0 right-0 bg-white border-t pt-3 mt-2 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => saveInspection(false)}
+                      disabled={modalSaving}
+                      className="px-3 py-2 rounded-xl bg-gray-100 text-xs text-gray-800 hover:bg-gray-200 disabled:opacity-50"
+                    >
+                      {modalSaving ? "Saving…" : "Save progress"}
+                    </button>
+                    <button
+                      onClick={() => saveInspection(true)}
+                      disabled={modalSaving}
+                      className="px-3 py-2 rounded-xl bg-purple-700 text-xs text-white hover:bg-purple-800 disabled:opacity-50"
+                    >
+                      {modalSaving ? "Saving…" : "Mark as complete"}
+                    </button>
                   </div>
+                  <button
+                    onClick={exportCurrentToPdf}
+                    className="px-3 py-2 rounded-xl border text-xs hover:bg-gray-50"
+                  >
+                    Download PDF
+                  </button>
                 </div>
               </>
             )}
@@ -1471,7 +1450,7 @@ type InspectionRowCardProps = {
   isAdmin: boolean;
 };
 
-function InspectionRowCard({
+const InspectionRowCard: React.FC<InspectionRowCardProps> = ({
   insp,
   siteName,
   selected,
@@ -1481,14 +1460,13 @@ function InspectionRowCard({
   canDuplicate,
   onDuplicate,
   isAdmin,
-}: InspectionRowCardProps) {
+}) => {
   const handleDelete = async () => {
-    if (!isAdmin) return;
-    if (
-      !window.confirm(
-        "Delete this inspection? This cannot be undone."
-      )
-    ) {
+    if (!isAdmin) {
+      alert("Only admins can delete inspections.");
+      return;
+    }
+    if (!confirm("Delete this inspection? This cannot be undone.")) {
       return;
     }
     try {
@@ -1505,11 +1483,11 @@ function InspectionRowCard({
   };
 
   const statusLabel =
-    insp.status === "submitted" ? "Completed" : "In progress";
+    insp.status === "in_progress" ? "In progress" : "Completed";
 
   return (
-    <div className="border rounded-2xl bg-white p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3 text-xs">
-      <div className="flex items-start gap-3">
+    <div className="border rounded-2xl bg-white p-3 flex flex-col md:flex-row md:items-center gap-3">
+      <div className="flex items-start gap-3 flex-1">
         <label className="mt-1">
           <input
             type="checkbox"
@@ -1517,34 +1495,32 @@ function InspectionRowCard({
             onChange={onToggleSelected}
           />
         </label>
-        <div>
+        <div className="space-y-1 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="font-semibold text-gray-900">
+            <div className="text-sm font-semibold text-gray-900">
               {insp.template_name}
             </div>
             <span
-              className={`px-2 py-0.5 rounded-full text-[10px] ${
-                insp.status === "submitted"
-                  ? "bg-emerald-50 text-emerald-700 border border-emerald-100"
-                  : "bg-amber-50 text-amber-700 border border-amber-100"
+              className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] ${
+                insp.status === "in_progress"
+                  ? "bg-amber-50 text-amber-700 border border-amber-200"
+                  : "bg-emerald-50 text-emerald-700 border border-emerald-200"
               }`}
             >
               {statusLabel}
             </span>
             {insp.score !== null && (
-              <span className="px-2 py-0.5 rounded-full text-[10px] bg-blue-50 text-blue-700 border border-blue-100">
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] bg-purple-50 text-purple-700 border border-purple-200">
                 Score: {insp.score}%
               </span>
             )}
           </div>
-          <div className="text-[11px] text-gray-500 mt-1 space-y-0.5">
+          <div className="text-[11px] text-gray-500 space-y-0.5">
             <div>Site: {siteName}</div>
-            <div>
-              Started: {formatDateTime(insp.started_at)}
-              {insp.submitted_at && (
-                <> • Completed: {formatDateTime(insp.submitted_at)}</>
-              )}
-            </div>
+            <div>Started: {formatDateTime(insp.started_at)}</div>
+            {insp.submitted_at && (
+              <div>Completed: {formatDateTime(insp.submitted_at)}</div>
+            )}
             {insp.owner_name && (
               <div>Inspector: {insp.owner_name}</div>
             )}
@@ -1552,17 +1528,17 @@ function InspectionRowCard({
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-2 justify-end">
+      <div className="flex flex-wrap gap-2 justify-end text-xs">
         <button
           onClick={onOpen}
-          className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
+          className="px-3 py-1.5 rounded-xl bg-purple-700 text-white hover:bg-purple-800"
         >
-          {insp.status === "submitted" ? "View" : "Continue"}
+          Open
         </button>
         {canDuplicate && (
           <button
             onClick={onDuplicate}
-            className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
+            className="px-3 py-1.5 rounded-xl border text-xs hover:bg-gray-50"
           >
             Duplicate
           </button>
@@ -1570,7 +1546,7 @@ function InspectionRowCard({
         {isAdmin && (
           <button
             onClick={handleDelete}
-            className="px-3 py-1 rounded-xl border text-xs text-rose-600 hover:bg-rose-50"
+            className="px-3 py-1.5 rounded-xl border text-xs text-rose-600 hover:bg-rose-50"
           >
             Delete
           </button>
@@ -1578,4 +1554,4 @@ function InspectionRowCard({
       </div>
     </div>
   );
-}
+};
