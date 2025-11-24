@@ -123,8 +123,8 @@ export default function InspectionsPage() {
   const [modalLoading, setModalLoading] = useState(false);
   const [modalSaving, setModalSaving] = useState(false);
 
-  // --------------------------
-  // Load user + role + display name + site_access
+    // --------------------------
+  // Load user + role + display name + site_access (from user_sites)
   // --------------------------
   useEffect(() => {
     const loadUserRole = async () => {
@@ -139,31 +139,45 @@ export default function InspectionsPage() {
           setSiteAccess(null);
           return;
         }
-
         setCurrentUserId(user.id);
 
-        const { data, error } = await supabase
+        // 1) Load role + name from profiles
+        const { data: profile, error: profileError } = await supabase
           .from("profiles")
-          .select("role, name, site_access")
+          .select("role, name")
           .eq("user_id", user.id)
           .single();
 
         const fallbackName = user.email || "Inspector";
+        const r: Role =
+          !profileError && profile?.role
+            ? (profile.role as Role)
+            : "inspector";
 
-        if (!error && data) {
-          setRole((data.role as Role) || "inspector");
-          setCurrentUserName(data.name || fallbackName);
-          setSiteAccess(
-            data.site_access === null
-              ? null // null = all sites
-              : ((data.site_access as string[]) || [])
-          );
+        setRole(r);
+        setCurrentUserName(profile?.name || fallbackName);
+
+        // 2) Load site access from user_sites (except for admin)
+        if (r === "admin") {
+          // admin can see all sites
+          setSiteAccess(null);
         } else {
-          setRole("inspector");
-          setCurrentUserName(fallbackName);
-          setSiteAccess([]); // no explicit sites
+          const { data: userSites, error: userSitesErr } = await supabase
+            .from("user_sites")
+            .select("site_id")
+            .eq("user_id", user.id);
+
+          if (userSitesErr) {
+            console.error("load user_sites error", userSitesErr);
+            setSiteAccess([]);
+          } else {
+            setSiteAccess(
+              (userSites || []).map((row: any) => row.site_id as string)
+            );
+          }
         }
-      } catch {
+      } catch (e) {
+        console.error("loadUserRole error", e);
         setRole("inspector");
         setCurrentUserName(null);
         setSiteAccess([]);
@@ -174,10 +188,6 @@ export default function InspectionsPage() {
 
     loadUserRole();
   }, []);
-
-  const isAdmin = role === "admin";
-  const isManager = role === "manager";
-
   // --------------------------
   // Load sites
   // --------------------------
