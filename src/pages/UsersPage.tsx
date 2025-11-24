@@ -14,7 +14,7 @@ type UserRow = {
   email: string | null;
   name: string | null;
   role: Role;
-  site_access: string[]; // empty array = no sites; admin uses null in DB
+  site_access: string[]; // derived from user_sites table
   is_banned: boolean;
 };
 
@@ -41,7 +41,7 @@ export default function UsersPage() {
   const [bulkResult, setBulkResult] = useState<string | null>(null);
 
   // --------------------------
-  // Load sites + users helpers
+  // Helpers to load sites + users
   // --------------------------
   const loadSites = async () => {
     const { data, error } = await supabase
@@ -59,20 +59,43 @@ export default function UsersPage() {
   };
 
   const loadUsers = async () => {
+    // 1) Load profiles
     const { data: profiles, error: profilesErr } = await supabase
       .from("profiles")
-      .select("user_id, email, name, role, site_access, is_banned")
+      .select("user_id, email, name, role, is_banned")
       .order("email", { ascending: true });
 
     if (profilesErr) throw profilesErr;
 
-    const mappedUsers: UserRow[] = (profiles || []).map((p: any) => ({
+    const profileList = profiles || [];
+    const userIds = profileList.map((p: any) => p.user_id).filter(Boolean);
+
+    // 2) Load site links from user_sites
+    let userSitesMap = new Map<string, string[]>();
+    if (userIds.length > 0) {
+      const { data: links, error: linksErr } = await supabase
+        .from("user_sites")
+        .select("user_id, site_id")
+        .in("user_id", userIds);
+
+      if (linksErr) throw linksErr;
+
+      for (const row of links || []) {
+        const uid = row.user_id as string;
+        const sid = row.site_id as string;
+        if (!uid || !sid) continue;
+        if (!userSitesMap.has(uid)) userSitesMap.set(uid, []);
+        userSitesMap.get(uid)!.push(sid);
+      }
+    }
+
+    // 3) Build UserRow[]
+    const mappedUsers: UserRow[] = profileList.map((p: any) => ({
       user_id: p.user_id,
       email: p.email ?? null,
       name: p.name ?? null,
       role: (p.role as Role) || "inspector",
-      // if site_access is null in DB, treat as [] in state (admins get null on save)
-      site_access: (p.site_access as string[] | null) || [],
+      site_access: userSitesMap.get(p.user_id) || [],
       is_banned: !!p.is_banned,
     }));
 
@@ -80,7 +103,7 @@ export default function UsersPage() {
   };
 
   // --------------------------
-  // Init: ensure current user is admin, then load sites + users
+  // Init: current user role, then sites + users
   // --------------------------
   useEffect(() => {
     const init = async () => {
@@ -108,7 +131,7 @@ export default function UsersPage() {
           return;
         }
 
-        const r: Role = (profile?.role as Role) || "inspector";
+        const r = (profile?.role as Role) || "inspector";
         setCurrentRole(r);
 
         if (r !== "admin") {
@@ -170,7 +193,7 @@ export default function UsersPage() {
   };
 
   // --------------------------
-  // Save an existing user
+  // Save changes for a single existing user
   // --------------------------
   const handleSaveUser = async (userId: string) => {
     const user = users.find((u) => u.user_id === userId);
@@ -180,23 +203,50 @@ export default function UsersPage() {
       setSavingUserId(userId);
       setError(null);
 
-      // Admins: site_access = null (they can see all sites)
-      // Others: site_access = array of site IDs
-      const payload = {
-        role: user.role,
-        site_access: user.role === "admin" ? null : user.site_access,
-        is_banned: user.is_banned,
-      };
-
+      // 1) Update profile role + banned flag
       const { error: updateErr } = await supabase
         .from("profiles")
-        .update(payload)
+        .update({
+          role: user.role,
+          is_banned: user.is_banned,
+        })
         .eq("user_id", user.user_id);
 
       if (updateErr) throw updateErr;
 
+      // 2) Sync user_sites for non-admins
+      if (user.role === "admin") {
+        // Admins see all sites, so we clear any restrictions
+        const { error: delErr } = await supabase
+          .from("user_sites")
+          .delete()
+          .eq("user_id", user.user_id);
+        if (delErr) throw delErr;
+      } else {
+        // Remove existing site links
+        const { error: delErr } = await supabase
+          .from("user_sites")
+          .delete()
+          .eq("user_id", user.user_id);
+        if (delErr) throw delErr;
+
+        // Insert new site links
+        if (user.site_access.length > 0) {
+          const inserts = user.site_access.map((siteId) => ({
+            user_id: user.user_id,
+            site_id: siteId,
+          }));
+
+          const { error: insertErr } = await supabase
+            .from("user_sites")
+            .insert(inserts);
+
+          if (insertErr) throw insertErr;
+        }
+      }
+
       alert("User updated.");
-      // Optional: reload from DB so UI always matches DB
+      // Optional: reload users so everything is fresh
       await loadUsers();
     } catch (e: any) {
       console.error("handleSaveUser error", e);
@@ -237,10 +287,7 @@ export default function UsersPage() {
         throw new Error("User was not created.");
       }
 
-      // 2) Insert profile
-      const site_access =
-        newRole === "admin" ? null : newSiteIds;
-
+      // 2) Insert profile (no site_access column here)
       const { error: profileErr } = await supabase
         .from("profiles")
         .insert({
@@ -248,13 +295,26 @@ export default function UsersPage() {
           email: newEmail.trim(),
           name: newName.trim() || newEmail.trim(),
           role: newRole || "inspector",
-          site_access,
           is_banned: false,
         });
 
       if (profileErr) throw profileErr;
 
-      // 3) Reload users so new user appears in table
+      // 3) Insert user_sites for non-admin
+      if (newRole !== "admin" && newSiteIds.length > 0) {
+        const inserts = newSiteIds.map((siteId) => ({
+          user_id: createdUser.id,
+          site_id: siteId,
+        }));
+
+        const { error: linksErr } = await supabase
+          .from("user_sites")
+          .insert(inserts);
+
+        if (linksErr) throw linksErr;
+      }
+
+      // 4) Reload users so new user appears in table
       await loadUsers();
 
       // Reset form
@@ -370,11 +430,22 @@ export default function UsersPage() {
               email,
               name: name || email,
               role,
-              site_access: role === "admin" ? null : siteIds,
               is_banned: false,
             });
 
           if (profileErr) throw profileErr;
+
+          // Insert user_sites for non-admin
+          if (role !== "admin" && siteIds.length > 0) {
+            const inserts = siteIds.map((siteId) => ({
+              user_id: createdUser.id,
+              site_id: siteId,
+            }));
+            const { error: linksErr } = await supabase
+              .from("user_sites")
+              .insert(inserts);
+            if (linksErr) throw linksErr;
+          }
 
           created++;
         } catch (e: any) {
