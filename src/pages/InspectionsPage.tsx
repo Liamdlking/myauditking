@@ -1140,7 +1140,7 @@ export default function InspectionsPage() {
         </div>
       )}
 
-      {/* Modal */}
+            {/* Modal */}
       {modalOpen && activeInspection && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
           <div className="w-full max-w-5xl max-h-[90vh] overflow-auto rounded-2xl bg-white shadow-xl p-5 space-y-4">
@@ -1152,6 +1152,7 @@ export default function InspectionsPage() {
               </div>
             ) : (
               <>
+                {/* Header (can scroll off) */}
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-start gap-3">
                     {templateLogo && (
@@ -1180,6 +1181,7 @@ export default function InspectionsPage() {
                 </div>
 
                 <div className="flex flex-col md:flex-row gap-4">
+                  {/* Left: sections & questions */}
                   <div className="flex-1 space-y-3">
                     {activeDefinition.sections.map((section) => {
                       // TITLE BLOCK (purple background) INSIDE INSPECTION
@@ -1346,7 +1348,7 @@ export default function InspectionsPage() {
                                   {q.type === "text" && (
                                     <textarea
                                       value={a.value || ""}
-                                                                            onChange={(e) =>
+                                      onChange={(e) =>
                                         updateAnswer(idx, {
                                           value: e.target.value,
                                         })
@@ -1443,9 +1445,9 @@ export default function InspectionsPage() {
                     })}
                   </div>
 
-                  {/* Right-hand sticky panel with save / complete buttons */}
+                  {/* Right: sticky action panel (Close + Save + Complete + PDF) */}
                   <div className="w-full md:w-64 md:flex-shrink-0">
-                    <div className="md:sticky md:top-2 space-y-3 border rounded-2xl bg-gray-50 p-3 text-xs">
+                    <div className="sticky top-2 space-y-3 border rounded-2xl bg-gray-50 p-3 text-xs">
                       <div className="space-y-1">
                         <div className="text-[11px] font-semibold text-gray-700">
                           Inspection summary
@@ -1471,6 +1473,12 @@ export default function InspectionsPage() {
                       </div>
 
                       <div className="space-y-1">
+                        <button
+                          onClick={closeInspectionModal}
+                          className="w-full px-3 py-2 rounded-xl bg-white border text-xs font-medium text-gray-700 hover:bg-gray-100"
+                        >
+                          Close
+                        </button>
                         <button
                           onClick={() => saveInspection(false)}
                           disabled={modalSaving}
@@ -1498,8 +1506,8 @@ export default function InspectionsPage() {
 
                       <p className="text-[10px] text-gray-400">
                         This panel stays in view while you scroll so you can
-                        quickly save or complete the inspection without going
-                        back to the top.
+                        quickly close, save, or complete the inspection without
+                        scrolling back to the top.
                       </p>
                     </div>
                   </div>
@@ -1509,9 +1517,6 @@ export default function InspectionsPage() {
           </div>
         </div>
       )}
-    </div>
-  );
-}
 
 // ---------------------------------------
 // Row card component
