@@ -4,7 +4,7 @@ import jsPDF from "jspdf";
 import { supabase } from "@/utils/supabaseClient";
 
 type Role = "admin" | "manager" | "inspector" | string | null;
-// IMPORTANT: must match DB constraint: 'in_progress' | 'submitted'
+// IMPORTANT: match DB constraint: 'in_progress' | 'submitted'
 type Status = "in_progress" | "submitted";
 
 type QuestionType =
@@ -99,7 +99,7 @@ export default function InspectionsPage() {
   const [roleLoading, setRoleLoading] = useState(true);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [currentUserName, setCurrentUserName] = useState<string | null>(null);
-  const [siteAccess, setSiteAccess] = useState<string[] | null>(null);
+  const [siteAccess, setSiteAccess] = useState<string[] | null>(null); // null = admin (all sites), [] = no sites
 
   const [sites, setSites] = useState<SiteRow[]>([]);
   const [inspections, setInspections] = useState<InspectionRow[]>([]);
@@ -123,8 +123,8 @@ export default function InspectionsPage() {
   const [modalLoading, setModalLoading] = useState(false);
   const [modalSaving, setModalSaving] = useState(false);
 
-    // --------------------------
-  // Load user + role + display name + site_access (from user_sites)
+  // --------------------------
+  // Load user + role + display name + site access (from user_sites)
   // --------------------------
   useEffect(() => {
     const loadUserRole = async () => {
@@ -141,39 +141,36 @@ export default function InspectionsPage() {
         }
         setCurrentUserId(user.id);
 
-        // 1) Load role + name from profiles
-        const { data: profile, error: profileError } = await supabase
+        const { data: profile, error: profileErr } = await supabase
           .from("profiles")
           .select("role, name")
           .eq("user_id", user.id)
           .single();
 
         const fallbackName = user.email || "Inspector";
-        const r: Role =
-          !profileError && profile?.role
-            ? (profile.role as Role)
-            : "inspector";
 
+        const r: Role = !profileErr && profile
+          ? ((profile.role as Role) || "inspector")
+          : "inspector";
         setRole(r);
         setCurrentUserName(profile?.name || fallbackName);
 
-        // 2) Load site access from user_sites (except for admin)
         if (r === "admin") {
-          // admin can see all sites
+          // admin sees all sites; we treat null as "no restriction"
           setSiteAccess(null);
         } else {
-          const { data: userSites, error: userSitesErr } = await supabase
+          // managers / inspectors – load from user_sites
+          const { data: userSites, error: usErr } = await supabase
             .from("user_sites")
             .select("site_id")
             .eq("user_id", user.id);
 
-          if (userSitesErr) {
-            console.error("load user_sites error", userSitesErr);
+          if (usErr) {
+            console.error("load user_sites error", usErr);
             setSiteAccess([]);
           } else {
-            setSiteAccess(
-              (userSites || []).map((row: any) => row.site_id as string)
-            );
+            const ids = (userSites || []).map((row: any) => row.site_id);
+            setSiteAccess(ids);
           }
         }
       } catch (e) {
@@ -188,8 +185,10 @@ export default function InspectionsPage() {
 
     loadUserRole();
   }, []);
+
   const isAdmin = role === "admin";
   const isManager = role === "manager";
+
   // --------------------------
   // Load sites
   // --------------------------
@@ -268,13 +267,15 @@ export default function InspectionsPage() {
     return s ? s.name : "Unknown site";
   };
 
-  // Sites the current user can filter by in the dropdown
+  // Sites the current user can filter by
   const visibleSites = useMemo(() => {
     if (!sites.length) return [];
-    if (role === "admin") return sites;
-    if (!siteAccess || siteAccess.length === 0) return [];
+    if (isAdmin) return sites;
+    if (!siteAccess || siteAccess.length === 0) {
+      return [];
+    }
     return sites.filter((s) => siteAccess.includes(s.id));
-  }, [sites, role, siteAccess]);
+  }, [sites, isAdmin, siteAccess]);
 
   // --------------------------
   // Filters (with site access)
@@ -283,7 +284,7 @@ export default function InspectionsPage() {
     let list = [...inspections];
 
     // Access control by site_access
-    if (role !== "admin") {
+    if (!isAdmin) {
       const allowed = siteAccess || [];
       list = list.filter((insp) => {
         // global inspections (no site) visible to everyone
@@ -303,7 +304,7 @@ export default function InspectionsPage() {
     }
 
     return list;
-  }, [inspections, role, siteAccess, selectedSiteId, statusFilter]);
+  }, [inspections, isAdmin, siteAccess, selectedSiteId, statusFilter]);
 
   const inProgress = filteredInspections.filter(
     (i) => i.status === "in_progress"
@@ -462,7 +463,7 @@ export default function InspectionsPage() {
   };
 
   // --------------------------
-  // Save (in_progress) or submitted (Completed)
+  // Score computation
   // --------------------------
   const computeScore = (items: InspectionItem[]): number | null => {
     const scored = items.filter(
@@ -508,55 +509,10 @@ export default function InspectionsPage() {
       answered_by_name: a.answered_by_name,
     }));
   };
-  const duplicateInspection = async (insp: InspectionRow) => {
-    try {
-      // Get current user so the duplicated inspection belongs to them
-      const { data: userData } = await supabase.auth.getUser();
-      const user = userData?.user;
-      if (!user) {
-        alert("Please log in first.");
-        return;
-      }
 
-      // Optional: load profile for nicer owner_name
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("name")
-        .eq("user_id", user.id)
-        .single();
-
-      const ownerName = profile?.name || user.email || "Inspector";
-
-      // Copy items from the existing inspection (or empty array)
-      const items: InspectionItem[] = insp.items || [];
-
-      // Recompute score based on copied items (or set to null if you prefer)
-      const score = computeScore(items);
-      const nowIso = new Date().toISOString();
-
-      const { error } = await supabase.from("inspections").insert({
-        template_id: insp.template_id,
-        template_name: insp.template_name,
-        site_id: insp.site_id,
-        site: insp.site,
-        status: "in_progress",
-        started_at: nowIso,
-        submitted_at: null,
-        score,
-        items,
-        owner_user_id: user.id,
-        owner_name: ownerName,
-      });
-
-      if (error) throw error;
-
-      await loadInspections();
-      alert("Inspection duplicated. You can now continue it in the list.");
-    } catch (e: any) {
-      console.error("duplicateInspection error", e);
-      alert(e?.message || "Could not duplicate inspection.");
-    }
-  };
+  // --------------------------
+  // Save (in_progress) or submitted (Completed)
+  // --------------------------
   const saveInspection = async (markComplete: boolean) => {
     if (!activeInspection) return;
     setModalSaving(true);
@@ -582,7 +538,9 @@ export default function InspectionsPage() {
 
       const score = computeScore(items);
       const nowIso = new Date().toISOString();
-      const newStatus: Status = markComplete ? "submitted" : "in_progress";
+      const newStatus: Status = markComplete
+        ? "submitted" // store as 'submitted' in DB
+        : "in_progress";
 
       const { error } = await supabase
         .from("inspections")
@@ -610,6 +568,45 @@ export default function InspectionsPage() {
       alert(e?.message || "Could not save inspection.");
     } finally {
       setModalSaving(false);
+    }
+  };
+
+  // --------------------------
+  // Duplicate inspection (admin + manager)
+  // --------------------------
+  const duplicateInspection = async (insp: InspectionRow) => {
+    if (!currentUserId) {
+      alert("You must be logged in to duplicate an inspection.");
+      return;
+    }
+
+    try {
+      const items: InspectionItem[] = insp.items || [];
+      const nowIso = new Date().toISOString();
+      const score = computeScore(items);
+
+      const { error } = await supabase.from("inspections").insert({
+        template_id: insp.template_id,
+        template_name: insp.template_name,
+        site_id: insp.site_id,
+        site: insp.site,
+        status: "in_progress",
+        started_at: nowIso,
+        submitted_at: null,
+        score,
+        items,
+        owner_user_id: currentUserId,
+        owner_name:
+          currentUserName || insp.owner_name || "Inspector",
+      });
+
+      if (error) throw error;
+
+      await loadInspections();
+      alert("Inspection duplicated.");
+    } catch (e: any) {
+      console.error("duplicateInspection error", e);
+      alert(e?.message || "Could not duplicate inspection.");
     }
   };
 
@@ -993,7 +990,7 @@ export default function InspectionsPage() {
           </p>
           {!roleLoading && role && (
             <p className="text-[11px] text-gray-400 mt-1">
-              {role === "admin"
+              {isAdmin
                 ? "You can see inspections for all sites."
                 : "You see inspections for the sites assigned to you."}
             </p>
@@ -1095,6 +1092,8 @@ export default function InspectionsPage() {
                     onToggleSelected={() => toggleSelected(insp.id)}
                     onOpen={() => openInspectionModal(insp)}
                     onDeleted={loadInspections}
+                    canDuplicate={isAdmin || isManager}
+                    onDuplicate={() => duplicateInspection(insp)}
                     isAdmin={isAdmin}
                   />
                 ))}
@@ -1118,6 +1117,8 @@ export default function InspectionsPage() {
                     onToggleSelected={() => toggleSelected(insp.id)}
                     onOpen={() => openInspectionModal(insp)}
                     onDeleted={loadInspections}
+                    canDuplicate={isAdmin || isManager}
+                    onDuplicate={() => duplicateInspection(insp)}
                     isAdmin={isAdmin}
                   />
                 ))}
@@ -1254,7 +1255,7 @@ export default function InspectionsPage() {
                                   </div>
                                 )}
 
-                                {q.type === "good_fair_poor" && (
+                                                               {q.type === "good_fair_poor" && (
                                   <div className="flex flex-wrap gap-3">
                                     {[
                                       { key: "good", label: "Good" },
@@ -1268,9 +1269,7 @@ export default function InspectionsPage() {
                                         <input
                                           type="radio"
                                           name={`${section.id}-${q.id}`}
-                                          checked={
-                                            a.choice_key === opt.key
-                                          }
+                                          checked={a.choice_key === opt.key}
                                           onChange={() =>
                                             updateAnswer(idx, {
                                               choice_key: opt.key,
@@ -1295,9 +1294,7 @@ export default function InspectionsPage() {
                                         <input
                                           type="radio"
                                           name={`${section.id}-${q.id}`}
-                                          checked={
-                                            a.choice_label === opt
-                                          }
+                                          checked={a.choice_label === opt}
                                           onChange={() =>
                                             updateAnswer(idx, {
                                               choice_key: opt,
@@ -1320,15 +1317,16 @@ export default function InspectionsPage() {
                                         value: e.target.value,
                                       })
                                     }
-                                    className="w-full border rounded-xl px-3 py-2 min-h-[60px]"
-                                    placeholder="Enter notes / description…"
+                                    className="w-full border rounded-xl px-2 py-1 text-xs"
+                                    placeholder="Type answer…"
                                   />
                                 )}
 
+                                {/* Notes */}
                                 {q.allowNotes && (
                                   <div>
                                     <label className="block text-[11px] text-gray-500 mb-1">
-                                      Extra notes
+                                      Notes
                                     </label>
                                     <textarea
                                       value={a.notes || ""}
@@ -1337,22 +1335,21 @@ export default function InspectionsPage() {
                                           notes: e.target.value,
                                         })
                                       }
-                                      className="w-full border rounded-xl px-3 py-1 min-h-[40px]"
-                                      placeholder="Optional notes…"
+                                      className="w-full border rounded-xl px-2 py-1 text-xs"
+                                      placeholder="Add extra details…"
                                     />
                                   </div>
                                 )}
 
+                                {/* Photos */}
                                 {q.allowPhoto && (
                                   <div className="space-y-1">
-                                    <label className="block text-[11px] text-gray-500 mb-1">
+                                    <label className="block text-[11px] text-gray-500">
                                       Photos
                                     </label>
                                     <div className="flex flex-wrap gap-2 items-center">
-                                      <label className="inline-flex items-center gap-2 cursor-pointer text-[11px]">
-                                        <span className="px-2 py-1 border rounded-xl bg-white hover:bg-gray-50">
-                                          Add photo
-                                        </span>
+                                      <label className="inline-flex items-center gap-1 text-[11px] cursor-pointer border rounded-xl px-2 py-1 bg-gray-50">
+                                        <span>Upload photo</span>
                                         <input
                                           type="file"
                                           accept="image/*"
@@ -1367,24 +1364,33 @@ export default function InspectionsPage() {
                                           }
                                         />
                                       </label>
-                                      {a.photos.map((p, pIndex) => (
-                                        <img
-                                          key={pIndex}
-                                          src={p}
-                                          alt="evidence"
-                                          className="h-10 w-10 object-cover rounded-md border bg-gray-100"
-                                        />
-                                      ))}
+                                      {a.photos && a.photos.length > 0 && (
+                                        <span className="text-[10px] text-gray-500">
+                                          {a.photos.length} photo
+                                          {a.photos.length === 1 ? "" : "s"}{" "}
+                                          attached
+                                        </span>
+                                      )}
                                     </div>
+                                    {a.photos && a.photos.length > 0 && (
+                                      <div className="flex flex-wrap gap-2 mt-1">
+                                        {a.photos.map((p, i) => (
+                                          <img
+                                            key={i}
+                                            src={p}
+                                            alt={`photo-${i + 1}`}
+                                            className="h-10 w-10 object-cover rounded-md border bg-gray-100"
+                                          />
+                                        ))}
+                                      </div>
+                                    )}
                                   </div>
                                 )}
 
+                                {/* Answered by */}
                                 {a.answered_by_name && (
-                                  <div className="text-[10px] text-gray-500">
-                                    Last answered by:{" "}
-                                      <span className="font-medium">
-                                        {a.answered_by_name}
-                                      </span>
+                                  <div className="text-[10px] text-gray-400">
+                                    Last answered by: {a.answered_by_name}
                                   </div>
                                 )}
                               </div>
@@ -1395,51 +1401,46 @@ export default function InspectionsPage() {
                     ))}
                   </div>
 
-                  {/* Side panel */}
-                  <div className="w-full md:w-64 space-y-3 text-xs">
-                    <div className="border rounded-2xl p-3 bg-gray-50 space-y-1">
+                  {/* Right sidebar actions */}
+                  <div className="w-full md:w-56 space-y-3">
+                    <div className="border rounded-2xl bg-gray-50 p-3 text-xs space-y-2">
                       <div className="font-semibold text-gray-800">
-                        Summary
+                        Inspection status
                       </div>
-                      <div className="text-gray-600">
-                        Status:{" "}
-                        <span className="font-medium">
-                          {activeInspection.status === "submitted"
-                            ? "Completed"
-                            : "In progress"}
-                        </span>
+                      <div className="text-[11px] text-gray-500">
+                        Current:{" "}
+                        {activeInspection.status === "submitted"
+                          ? "Completed"
+                          : "In progress"}
                       </div>
                       {activeInspection.score !== null && (
-                        <div className="text-gray-600">
+                        <div className="text-[11px] text-gray-500">
                           Score:{" "}
-                          <span className="font-medium">
+                          <span className="font-semibold">
                             {activeInspection.score}%
                           </span>
                         </div>
                       )}
                     </div>
 
-                    <div className="border rounded-2xl p-3 bg-gray-50 space-y-2">
-                      <div className="font-semibold text-gray-800">
-                        Actions
-                      </div>
+                    <div className="border rounded-2xl bg-gray-50 p-3 text-xs space-y-2">
                       <button
                         onClick={() => saveInspection(false)}
                         disabled={modalSaving}
-                        className="w-full px-3 py-2 rounded-xl border bg-white hover:bg-gray-100 disabled:opacity-50"
+                        className="w-full px-3 py-2 rounded-xl bg-purple-700 text-white text-xs hover:bg-purple-800 disabled:opacity-50"
                       >
-                        Save progress
+                        {modalSaving ? "Saving…" : "Save in progress"}
                       </button>
                       <button
                         onClick={() => saveInspection(true)}
                         disabled={modalSaving}
-                        className="w-full px-3 py-2 rounded-xl bg-purple-700 text-white hover:bg-purple-800 disabled:opacity-50"
+                        className="w-full px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs hover:bg-emerald-700 disabled:opacity-50"
                       >
-                        Mark as complete
+                        {modalSaving ? "Saving…" : "Complete inspection"}
                       </button>
                       <button
                         onClick={exportCurrentToPdf}
-                        className="w-full px-3 py-2 rounded-xl border bg-white hover:bg-gray-100"
+                        className="w-full px-3 py-2 rounded-xl border text-xs hover:bg-gray-50"
                       >
                         Download PDF
                       </button>
@@ -1456,7 +1457,7 @@ export default function InspectionsPage() {
 }
 
 // --------------------------
-// Row component
+// Row card component
 // --------------------------
 type InspectionRowCardProps = {
   insp: InspectionRow;
@@ -1465,6 +1466,8 @@ type InspectionRowCardProps = {
   onToggleSelected: () => void;
   onOpen: () => void;
   onDeleted: () => void;
+  canDuplicate: boolean;
+  onDuplicate: () => void;
   isAdmin: boolean;
 };
 
@@ -1475,14 +1478,17 @@ function InspectionRowCard({
   onToggleSelected,
   onOpen,
   onDeleted,
+  canDuplicate,
+  onDuplicate,
   isAdmin,
 }: InspectionRowCardProps) {
-  const deleteOne = async () => {
-    if (!isAdmin) {
-      alert("Only admins can delete inspections.");
-      return;
-    }
-    if (!confirm("Delete this inspection? This cannot be undone.")) {
+  const handleDelete = async () => {
+    if (!isAdmin) return;
+    if (
+      !window.confirm(
+        "Delete this inspection? This cannot be undone."
+      )
+    ) {
       return;
     }
     try {
@@ -1500,60 +1506,71 @@ function InspectionRowCard({
 
   const statusLabel =
     insp.status === "submitted" ? "Completed" : "In progress";
-  const statusColor =
-    insp.status === "submitted"
-      ? "bg-emerald-50 text-emerald-700 border-emerald-100"
-      : "bg-amber-50 text-amber-700 border-amber-100";
 
   return (
-    <div className="border rounded-2xl bg-white p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-2 shadow-sm">
-      <div className="flex items-start gap-3 flex-1">
-        <input
-          type="checkbox"
-          checked={selected}
-          onChange={onToggleSelected}
-          className="mt-1"
-        />
-        <div className="space-y-1 text-sm">
+    <div className="border rounded-2xl bg-white p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3 text-xs">
+      <div className="flex items-start gap-3">
+        <label className="mt-1">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={onToggleSelected}
+          />
+        </label>
+        <div>
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-semibold text-gray-900">
+            <div className="font-semibold text-gray-900">
               {insp.template_name}
-            </span>
+            </div>
             <span
-              className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] ${statusColor}`}
+              className={`px-2 py-0.5 rounded-full text-[10px] ${
+                insp.status === "submitted"
+                  ? "bg-emerald-50 text-emerald-700 border border-emerald-100"
+                  : "bg-amber-50 text-amber-700 border border-amber-100"
+              }`}
             >
               {statusLabel}
             </span>
-            <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-700 px-2 py-0.5 text-[11px]">
-              {siteName}
-            </span>
-          </div>
-          <div className="text-[11px] text-gray-500 space-x-2">
-            <span>Started: {formatDateTime(insp.started_at)}</span>
-            {insp.submitted_at && (
-              <span>• Submitted: {formatDateTime(insp.submitted_at)}</span>
-            )}
-            {insp.owner_name && (
-              <span>• Inspector: {insp.owner_name}</span>
-            )}
             {insp.score !== null && (
-              <span>• Score: {insp.score}%</span>
+              <span className="px-2 py-0.5 rounded-full text-[10px] bg-blue-50 text-blue-700 border border-blue-100">
+                Score: {insp.score}%
+              </span>
+            )}
+          </div>
+          <div className="text-[11px] text-gray-500 mt-1 space-y-0.5">
+            <div>Site: {siteName}</div>
+            <div>
+              Started: {formatDateTime(insp.started_at)}
+              {insp.submitted_at && (
+                <> • Completed: {formatDateTime(insp.submitted_at)}</>
+              )}
+            </div>
+            {insp.owner_name && (
+              <div>Inspector: {insp.owner_name}</div>
             )}
           </div>
         </div>
       </div>
 
-      <div className="flex items-center gap-2 text-xs">
+      <div className="flex flex-wrap gap-2 justify-end">
         <button
           onClick={onOpen}
-          className="px-3 py-1 rounded-xl border hover:bg-gray-50"
+          className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
         >
-          {insp.status === "in_progress" ? "Continue" : "View"}
+          {insp.status === "submitted" ? "View" : "Continue"}
         </button>
+        {canDuplicate && (
+          <button
+            onClick={onDuplicate}
+            className="px-3 py-1 rounded-xl border text-xs hover:bg-gray-50"
+          >
+            Duplicate
+          </button>
+        )}
         {isAdmin && (
           <button
-            onClick={deleteOne}
-            className="px-3 py-1 rounded-xl border text-rose-600 hover:bg-rose-50"
+            onClick={handleDelete}
+            className="px-3 py-1 rounded-xl border text-xs text-rose-600 hover:bg-rose-50"
           >
             Delete
           </button>
