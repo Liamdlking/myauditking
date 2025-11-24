@@ -7,11 +7,7 @@ type Role = "admin" | "manager" | "inspector" | string | null;
 // IMPORTANT: match DB constraint: 'in_progress' | 'submitted'
 type Status = "in_progress" | "submitted";
 
-type QuestionType =
-  | "yes_no_na"
-  | "good_fair_poor"
-  | "multiple_choice"
-  | "text";
+type QuestionType = "yes_no_na" | "good_fair_poor" | "multiple_choice" | "text";
 
 type TemplateQuestion = {
   id: string;
@@ -26,6 +22,7 @@ type TemplateQuestion = {
 type TemplateSection = {
   id: string;
   title: string;
+  is_title?: boolean; // title-only block support
   image_data_url?: string | null;
   questions: TemplateQuestion[];
 };
@@ -46,7 +43,6 @@ type InspectionItem = {
   notes: string | null;
   photos: string[];
   required: boolean;
-  // who last answered this question
   answered_by_user_id: string | null;
   answered_by_name: string | null;
 };
@@ -433,7 +429,6 @@ export default function InspectionsPage() {
           ? {
               ...a,
               ...patch,
-              // on any change, stamp who answered it
               answered_by_user_id: currentUserId || a.answered_by_user_id,
               answered_by_name: currentUserName || a.answered_by_name,
             }
@@ -521,13 +516,11 @@ export default function InspectionsPage() {
       const items = buildItemsFromAnswers();
 
       if (markComplete) {
-        // validate required
         const missingRequired = items.some((it) => {
           if (!it.required) return false;
           if (it.type === "text") {
             return !it.value || it.value.trim() === "";
           }
-          // choice-based
           return !it.choice_key;
         });
         if (missingRequired) {
@@ -539,9 +532,7 @@ export default function InspectionsPage() {
 
       const score = computeScore(items);
       const nowIso = new Date().toISOString();
-      const newStatus: Status = markComplete
-        ? "submitted" // store as 'submitted' in DB
-        : "in_progress";
+      const newStatus: Status = markComplete ? "submitted" : "in_progress";
 
       const { error } = await supabase
         .from("inspections")
@@ -685,6 +676,19 @@ export default function InspectionsPage() {
     }
 
     for (const section of activeDefinition.sections || []) {
+      // TITLE BLOCKS: purple-style heading in PDF too (optional)
+      if (section.is_title) {
+        if (y > pageHeight - 20) {
+          doc.addPage();
+          y = 15;
+        }
+        doc.setFontSize(12);
+        doc.setFont(undefined, "bold");
+        y = addTextWrapped(section.title || "Title", 15, y);
+        y += 3;
+        continue;
+      }
+
       if (y > pageHeight - 20) {
         doc.addPage();
         y = 15;
@@ -809,7 +813,6 @@ export default function InspectionsPage() {
       );
 
       for (const insp of targets) {
-        // fetch template + logo + definition
         const { data: tpl, error: tplErr } = await supabase
           .from("templates")
           .select("definition, logo_data_url")
@@ -892,13 +895,24 @@ export default function InspectionsPage() {
           return yPos;
         };
 
-        // Build quick lookup
         const itemsByKey = new Map<string, InspectionItem>();
         for (const it of items) {
           itemsByKey.set(`${it.section_id}:${it.question_id}`, it);
         }
 
         for (const section of def.sections || []) {
+          if (section.is_title) {
+            if (y > pageHeight - 20) {
+              doc.addPage();
+              y = 15;
+            }
+            doc.setFontSize(12);
+            doc.setFont(undefined, "bold");
+            y = addTextWrapped(section.title || "Title", 15, y);
+            y += 3;
+            continue;
+          }
+
           if (y > pageHeight - 20) {
             doc.addPage();
             y = 15;
@@ -1024,7 +1038,6 @@ export default function InspectionsPage() {
             >
               <option value="all">All</option>
               <option value="in_progress">In progress</option>
-              {/* DB value 'submitted', label 'Completed' */}
               <option value="submitted">Completed</option>
             </select>
           </div>
@@ -1072,12 +1085,11 @@ export default function InspectionsPage() {
           Loading inspections…
         </div>
       ) : filteredInspections.length === 0 ? (
-        <div className="rounded-2xl border bg-white p-4 text-sm text-gray-600">
+        <div className="rounded-xl border bg-white p-4 text-sm text-gray-600">
           No inspections found.
         </div>
       ) : (
         <div className="space-y-4">
-          {/* In progress */}
           {inProgress.length > 0 && (
             <div className="space-y-2">
               <h2 className="text-sm font-semibold text-gray-700">
@@ -1102,7 +1114,6 @@ export default function InspectionsPage() {
             </div>
           )}
 
-          {/* Completed (status = submitted) */}
           {submitted.length > 0 && (
             <div className="space-y-2">
               <h2 className="text-sm font-semibold text-gray-700">
@@ -1132,7 +1143,6 @@ export default function InspectionsPage() {
       {/* Modal */}
       {modalOpen && activeInspection && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          {/* this container scrolls; sticky footer lives inside it */}
           <div className="w-full max-w-5xl max-h-[90vh] overflow-auto rounded-2xl bg-white shadow-xl p-5 space-y-4">
             {modalLoading ? (
               <div className="text-sm text-gray-600">Loading…</div>
@@ -1169,262 +1179,330 @@ export default function InspectionsPage() {
                   </button>
                 </div>
 
-                {/* Questions */}
-                <div className="flex flex-col md:flex-row gap-4 pb-16">
+                <div className="flex flex-col md:flex-row gap-4">
                   <div className="flex-1 space-y-3">
-                    {activeDefinition.sections.map((section) => (
-                      <div
-                        key={section.id}
-                        className="border rounded-2xl p-3 bg-gray-50 space-y-3"
-                      >
-                        <div className="flex items-center gap-3">
-                          {section.image_data_url && (
-                            <img
-                              src={section.image_data_url}
-                              alt={section.title}
-                              className="h-8 w-8 object-cover rounded-md border bg-white"
-                            />
-                          )}
-                          <h3 className="text-sm font-semibold text-gray-800">
-                            {section.title}
-                          </h3>
-                        </div>
+                    {activeDefinition.sections.map((section) => {
+                      // TITLE BLOCK (purple background) INSIDE INSPECTION
+                      if (section.is_title) {
+                        return (
+                          <div key={section.id} className="my-3">
+                            <div className="bg-purple-100 border border-purple-300 rounded-xl px-4 py-2 shadow-sm">
+                              <span className="text-xs uppercase tracking-wide text-purple-500 font-semibold">
+                                Section group
+                              </span>
+                              <div className="mt-1 text-sm font-semibold text-purple-900">
+                                {section.title}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      }
 
-                        <div className="space-y-2">
-                          {section.questions.map((q) => {
-                            const idx = answers.findIndex(
-                              (a) =>
-                                a.section_id === section.id &&
-                                a.question_id === q.id
-                            );
-                            if (idx === -1) return null;
-                            const a = answers[idx];
+                      // Normal section with questions
+                      return (
+                        <div
+                          key={section.id}
+                          className="border rounded-2xl p-3 bg-gray-50 space-y-3"
+                        >
+                          <div className="flex items-center gap-3">
+                            {section.image_data_url && (
+                              <img
+                                src={section.image_data_url}
+                                alt={section.title}
+                                className="h-8 w-8 object-cover rounded-md border bg-white"
+                              />
+                            )}
+                            <h3 className="text-sm font-semibold text-gray-800">
+                              {section.title}
+                            </h3>
+                          </div>
 
-                            return (
-                              <div
-                                key={q.id}
-                                className="border rounded-xl bg-white p-3 text-xs space-y-2"
-                              >
-                                <div className="flex justify-between items-start gap-2">
-                                  <div className="font-medium text-gray-800">
-                                    {q.label}
-                                    {q.required && (
-                                      <span className="ml-2 text-[10px] text-rose-600">
-                                        (required)
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="text-[10px] text-gray-400">
-                                    {q.type === "yes_no_na" &&
-                                      "Yes / No / N/A"}
-                                    {q.type === "good_fair_poor" &&
-                                      "Good / Fair / Poor"}
-                                    {q.type === "multiple_choice" &&
-                                      "Multiple choice"}
-                                    {q.type === "text" &&
-                                      "Text response"}
-                                  </div>
-                                </div>
+                          <div className="space-y-2">
+                            {section.questions.map((q) => {
+                              const idx = answers.findIndex(
+                                (a) =>
+                                  a.section_id === section.id &&
+                                  a.question_id === q.id
+                              );
+                              if (idx === -1) return null;
+                              const a = answers[idx];
 
-                                {/* Answer controls */}
-                                {q.type === "yes_no_na" && (
-                                  <div className="flex flex-wrap gap-3">
-                                    {[
-                                      { key: "yes", label: "Yes" },
-                                      { key: "no", label: "No" },
-                                      { key: "na", label: "N/A" },
-                                    ].map((opt) => (
-                                      <label
-                                        key={opt.key}
-                                        className="inline-flex items-center gap-1"
-                                      >
-                                        <input
-                                          type="radio"
-                                          name={`${section.id}-${q.id}`}
-                                          checked={
-                                            a.choice_key === opt.key
-                                          }
-                                          onChange={() =>
-                                            updateAnswer(idx, {
-                                              choice_key: opt.key,
-                                              choice_label: opt.label,
-                                              value: opt.label,
-                                            })
-                                          }
-                                        />
-                                        <span>{opt.label}</span>
-                                      </label>
-                                    ))}
-                                  </div>
-                                )}
-
-                                {q.type === "good_fair_poor" && (
-                                  <div className="flex flex-wrap gap-3">
-                                    {[
-                                      { key: "good", label: "Good" },
-                                      { key: "fair", label: "Fair" },
-                                      { key: "poor", label: "Poor" },
-                                    ].map((opt) => (
-                                      <label
-                                        key={opt.key}
-                                        className="inline-flex items-center gap-1"
-                                      >
-                                        <input
-                                          type="radio"
-                                          name={`${section.id}-${q.id}`}
-                                          checked={
-                                            a.choice_key === opt.key
-                                          }
-                                          onChange={() =>
-                                            updateAnswer(idx, {
-                                              choice_key: opt.key,
-                                              choice_label: opt.label,
-                                              value: opt.label,
-                                            })
-                                          }
-                                        />
-                                        <span>{opt.label}</span>
-                                      </label>
-                                    ))}
-                                  </div>
-                                )}
-
-                                {q.type === "multiple_choice" && (
-                                  <div className="flex flex-wrap gap-3">
-                                    {(q.options || []).map((opt) => (
-                                      <label
-                                        key={opt}
-                                        className="inline-flex items-center gap-1"
-                                      >
-                                        <input
-                                          type="radio"
-                                          name={`${section.id}-${q.id}`}
-                                          checked={
-                                            a.choice_label === opt
-                                          }
-                                          onChange={() =>
-                                            updateAnswer(idx, {
-                                              choice_key: opt,
-                                              choice_label: opt,
-                                              value: opt,
-                                            })
-                                          }
-                                        />
-                                        <span>{opt}</span>
-                                      </label>
-                                    ))}
-                                  </div>
-                                )}
-
-                                {q.type === "text" && (
-                                  <textarea
-                                    value={a.value || ""}
-                                    onChange={(e) =>
-                                      updateAnswer(idx, {
-                                        value: e.target.value,
-                                      })
-                                    }
-                                    className="w-full border rounded-xl px-2 py-1 text-xs"
-                                    placeholder="Type answer…"
-                                  />
-                                )}
-
-                                {/* Notes */}
-                                {q.allowNotes && (
-                                  <div>
-                                    <label className="block text-[10px] text-gray-500 mb-1">
-                                      Notes
-                                    </label>
-                                    <textarea
-                                      value={a.notes || ""}
-                                      onChange={(e) =>
-                                        updateAnswer(idx, {
-                                          notes: e.target.value,
-                                        })
-                                      }
-                                      className="w-full border rounded-xl px-2 py-1 text-xs"
-                                      placeholder="Optional notes…"
-                                    />
-                                  </div>
-                                )}
-
-                                {/* Photos */}
-                                {q.allowPhoto && (
-                                  <div className="space-y-1">
-                                    <label className="block text-[10px] text-gray-500">
-                                      Photos ({a.photos.length})
-                                    </label>
-                                    <div className="flex flex-wrap gap-2">
-                                      {a.photos.map((p, i) => (
-                                        <img
-                                          key={i}
-                                          src={p}
-                                          alt={`Photo ${i + 1}`}
-                                          className="h-12 w-12 object-cover rounded border"
-                                        />
-                                      ))}
-                                      <label className="inline-flex items-center gap-1 text-[11px] cursor-pointer">
-                                        <span className="px-2 py-1 border rounded-xl bg-gray-50 hover:bg-gray-100">
-                                          Upload
+                              return (
+                                <div
+                                  key={q.id}
+                                  className="border rounded-xl bg-white p-3 text-xs space-y-2"
+                                >
+                                  <div className="flex justify-between items-start gap-2">
+                                    <div className="font-medium text-gray-800">
+                                      {q.label}
+                                      {q.required && (
+                                        <span className="ml-2 text-[10px] text-rose-600">
+                                          (required)
                                         </span>
-                                        <input
-                                          type="file"
-                                          accept="image/*"
-                                          className="hidden"
-                                          onChange={(e) =>
-                                            handlePhotoChange(
-                                              idx,
-                                              e.target.files
-                                                ? e.target.files[0]
-                                                : null
-                                            )
-                                          }
-                                        />
-                                      </label>
+                                      )}
+                                    </div>
+                                    <div className="text-[10px] text-gray-400">
+                                      {q.type === "yes_no_na" &&
+                                        "Yes / No / N/A"}
+                                      {q.type === "good_fair_poor" &&
+                                        "Good / Fair / Poor"}
+                                      {q.type === "multiple_choice" &&
+                                        "Multiple choice"}
+                                      {q.type === "text" &&
+                                        "Text response"}
                                     </div>
                                   </div>
-                                )}
 
-                                {/* Answered by */}
-                                {a.answered_by_name && (
-                                  <p className="text-[10px] text-gray-400">
-                                    Last answered by:{" "}
-                                    {a.answered_by_name}
-                                  </p>
-                                )}
-                              </div>
-                            );
-                          })}
+                                  {/* Answer controls */}
+                                  {q.type === "yes_no_na" && (
+                                    <div className="flex flex-wrap gap-3">
+                                      {[
+                                        { key: "yes", label: "Yes" },
+                                        { key: "no", label: "No" },
+                                        { key: "na", label: "N/A" },
+                                      ].map((opt) => (
+                                        <label
+                                          key={opt.key}
+                                          className="inline-flex items-center gap-1"
+                                        >
+                                          <input
+                                            type="radio"
+                                            name={`${section.id}-${q.id}`}
+                                            checked={
+                                              a.choice_key === opt.key
+                                            }
+                                            onChange={() =>
+                                              updateAnswer(idx, {
+                                                choice_key: opt.key,
+                                                choice_label: opt.label,
+                                                value: opt.label,
+                                              })
+                                            }
+                                          />
+                                          <span>{opt.label}</span>
+                                        </label>
+                                      ))}
+                                    </div>
+                                  )}
+
+                                  {q.type === "good_fair_poor" && (
+                                    <div className="flex flex-wrap gap-3">
+                                      {[
+                                        { key: "good", label: "Good" },
+                                        { key: "fair", label: "Fair" },
+                                        { key: "poor", label: "Poor" },
+                                      ].map((opt) => (
+                                        <label
+                                          key={opt.key}
+                                          className="inline-flex items-center gap-1"
+                                        >
+                                          <input
+                                            type="radio"
+                                            name={`${section.id}-${q.id}`}
+                                            checked={
+                                              a.choice_key === opt.key
+                                            }
+                                            onChange={() =>
+                                              updateAnswer(idx, {
+                                                choice_key: opt.key,
+                                                choice_label: opt.label,
+                                                value: opt.label,
+                                              })
+                                            }
+                                          />
+                                          <span>{opt.label}</span>
+                                        </label>
+                                      ))}
+                                    </div>
+                                  )}
+
+                                  {q.type === "multiple_choice" && (
+                                    <div className="flex flex-wrap gap-3">
+                                      {(q.options || []).map((opt) => (
+                                        <label
+                                          key={opt}
+                                          className="inline-flex items-center gap-1"
+                                        >
+                                          <input
+                                            type="radio"
+                                            name={`${section.id}-${q.id}`}
+                                            checked={
+                                              a.choice_label === opt
+                                            }
+                                            onChange={() =>
+                                              updateAnswer(idx, {
+                                                choice_key: opt,
+                                                choice_label: opt,
+                                                value: opt,
+                                              })
+                                            }
+                                          />
+                                          <span>{opt}</span>
+                                        </label>
+                                      ))}
+                                    </div>
+                                  )}
+
+                                  {q.type === "text" && (
+                                    <textarea
+                                      value={a.value || ""}
+                                                                            onChange={(e) =>
+                                        updateAnswer(idx, {
+                                          value: e.target.value,
+                                        })
+                                      }
+                                      className="w-full border rounded-xl px-2 py-1 text-xs min-h-[60px]"
+                                      placeholder="Type answer…"
+                                    />
+                                  )}
+
+                                  {/* Notes */}
+                                  {q.allowNotes && (
+                                    <div>
+                                      <label className="block text-[10px] text-gray-500 mb-1">
+                                        Notes
+                                      </label>
+                                      <textarea
+                                        value={a.notes || ""}
+                                        onChange={(e) =>
+                                          updateAnswer(idx, {
+                                            notes: e.target.value,
+                                          })
+                                        }
+                                        className="w-full border rounded-xl px-2 py-1 text-[11px] min-h-[40px]"
+                                        placeholder="Optional notes…"
+                                      />
+                                    </div>
+                                  )}
+
+                                  {/* Photos */}
+                                  {q.allowPhoto && (
+                                    <div className="space-y-1">
+                                      <label className="block text-[10px] text-gray-500">
+                                        Photos
+                                      </label>
+                                      <div className="flex flex-wrap gap-2 items-center">
+                                        <label className="inline-flex items-center gap-2 text-[11px] cursor-pointer">
+                                          <span className="px-2 py-1 border rounded-xl bg-white hover:bg-gray-50">
+                                            + Add photo
+                                          </span>
+                                          <input
+                                            type="file"
+                                            accept="image/*"
+                                            className="hidden"
+                                            onChange={(e) =>
+                                              handlePhotoChange(
+                                                idx,
+                                                e.target.files
+                                                  ? e.target.files[0]
+                                                  : null
+                                              )
+                                            }
+                                          />
+                                        </label>
+                                        {a.photos && a.photos.length > 0 && (
+                                          <span className="text-[10px] text-gray-400">
+                                            {a.photos.length} photo
+                                            {a.photos.length === 1 ? "" : "s"}{" "}
+                                            attached
+                                          </span>
+                                        )}
+                                      </div>
+                                      {a.photos && a.photos.length > 0 && (
+                                        <div className="flex flex-wrap gap-2 mt-1">
+                                          {a.photos.map((p, i) => (
+                                            <img
+                                              key={i}
+                                              src={p}
+                                              alt={`Photo ${i + 1}`}
+                                              className="h-12 w-12 rounded-md object-cover border bg-gray-50"
+                                            />
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  {/* Answered by */}
+                                  {(a.answered_by_name ||
+                                    a.answered_by_user_id) && (
+                                    <div className="pt-1 border-t border-dashed border-gray-100 mt-1 text-[10px] text-gray-400">
+                                      <span>
+                                        Last answered by{" "}
+                                        {a.answered_by_name ||
+                                          "this inspector"}
+                                      </span>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Right-hand sticky panel with save / complete buttons */}
+                  <div className="w-full md:w-64 md:flex-shrink-0">
+                    <div className="md:sticky md:top-2 space-y-3 border rounded-2xl bg-gray-50 p-3 text-xs">
+                      <div className="space-y-1">
+                        <div className="text-[11px] font-semibold text-gray-700">
+                          Inspection summary
+                        </div>
+                        <div className="flex flex-wrap gap-2 items-center">
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] bg-white border text-gray-600">
+                            Status:{" "}
+                            <span className="ml-1 font-medium text-gray-800">
+                              {activeInspection.status === "in_progress"
+                                ? "In progress"
+                                : "Completed"}
+                            </span>
+                          </span>
+                          {activeInspection.score !== null && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] bg-white border text-gray-600">
+                              Score:{" "}
+                              <span className="ml-1 font-semibold text-gray-900">
+                                {activeInspection.score}%
+                              </span>
+                            </span>
+                          )}
                         </div>
                       </div>
-                    ))}
-                  </div>
-                </div>
 
-                {/* Sticky footer inside modal */}
-                <div className="sticky bottom-0 left-0 right-0 bg-white border-t pt-3 mt-2 flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      onClick={() => saveInspection(false)}
-                      disabled={modalSaving}
-                      className="px-3 py-2 rounded-xl bg-gray-100 text-xs text-gray-800 hover:bg-gray-200 disabled:opacity-50"
-                    >
-                      {modalSaving ? "Saving…" : "Save progress"}
-                    </button>
-                    <button
-                      onClick={() => saveInspection(true)}
-                      disabled={modalSaving}
-                      className="px-3 py-2 rounded-xl bg-purple-700 text-xs text-white hover:bg-purple-800 disabled:opacity-50"
-                    >
-                      {modalSaving ? "Saving…" : "Mark as complete"}
-                    </button>
+                      <div className="space-y-1">
+                        <button
+                          onClick={() => saveInspection(false)}
+                          disabled={modalSaving}
+                          className="w-full px-3 py-2 rounded-xl bg-white border text-xs font-medium text-gray-800 hover:bg-gray-100 disabled:opacity-50"
+                        >
+                          {modalSaving ? "Saving…" : "Save progress"}
+                        </button>
+                        <button
+                          onClick={() => saveInspection(true)}
+                          disabled={
+                            modalSaving ||
+                            activeInspection.status === "submitted"
+                          }
+                          className="w-full px-3 py-2 rounded-xl bg-purple-700 text-white text-xs font-medium hover:bg-purple-800 disabled:opacity-50 disabled:hover:bg-purple-700"
+                        >
+                          Mark as complete
+                        </button>
+                        <button
+                          onClick={exportCurrentToPdf}
+                          className="w-full px-3 py-2 rounded-xl bg-white border text-xs font-medium text-gray-800 hover:bg-gray-100"
+                        >
+                          Export as PDF
+                        </button>
+                      </div>
+
+                      <p className="text-[10px] text-gray-400">
+                        This panel stays in view while you scroll so you can
+                        quickly save or complete the inspection without going
+                        back to the top.
+                      </p>
+                    </div>
                   </div>
-                  <button
-                    onClick={exportCurrentToPdf}
-                    className="px-3 py-2 rounded-xl border text-xs hover:bg-gray-50"
-                  >
-                    Download PDF
-                  </button>
                 </div>
               </>
             )}
@@ -1435,22 +1513,22 @@ export default function InspectionsPage() {
   );
 }
 
-// --------------------------
+// ---------------------------------------
 // Row card component
-// --------------------------
+// ---------------------------------------
 type InspectionRowCardProps = {
   insp: InspectionRow;
   siteName: string;
   selected: boolean;
   onToggleSelected: () => void;
   onOpen: () => void;
-  onDeleted: () => void;
+  onDeleted: () => Promise<void> | void;
   canDuplicate: boolean;
   onDuplicate: () => void;
   isAdmin: boolean;
 };
 
-const InspectionRowCard: React.FC<InspectionRowCardProps> = ({
+function InspectionRowCard({
   insp,
   siteName,
   selected,
@@ -1460,24 +1538,26 @@ const InspectionRowCard: React.FC<InspectionRowCardProps> = ({
   canDuplicate,
   onDuplicate,
   isAdmin,
-}) => {
+}: InspectionRowCardProps) {
   const handleDelete = async () => {
-    if (!isAdmin) {
-      alert("Only admins can delete inspections.");
+    if (!isAdmin) return;
+    if (
+      !window.confirm(
+        "Delete this inspection? This cannot be undone."
+      )
+    ) {
       return;
     }
-    if (!confirm("Delete this inspection? This cannot be undone.")) {
-      return;
-    }
+
     try {
       const { error } = await supabase
         .from("inspections")
         .delete()
         .eq("id", insp.id);
       if (error) throw error;
-      onDeleted();
+      await onDeleted();
     } catch (e: any) {
-      console.error("delete inspection error", e);
+      console.error("delete single inspection error", e);
       alert(e?.message || "Could not delete inspection.");
     }
   };
@@ -1486,7 +1566,7 @@ const InspectionRowCard: React.FC<InspectionRowCardProps> = ({
     insp.status === "in_progress" ? "In progress" : "Completed";
 
   return (
-    <div className="border rounded-2xl bg-white p-3 flex flex-col md:flex-row md:items-center gap-3">
+    <div className="rounded-2xl border bg-white p-3 flex flex-col md:flex-row md:items-center gap-3 text-xs">
       <div className="flex items-start gap-3 flex-1">
         <label className="mt-1">
           <input
@@ -1495,43 +1575,45 @@ const InspectionRowCard: React.FC<InspectionRowCardProps> = ({
             onChange={onToggleSelected}
           />
         </label>
-        <div className="space-y-1 flex-1">
+        <div className="space-y-1">
           <div className="flex flex-wrap items-center gap-2">
             <div className="text-sm font-semibold text-gray-900">
               {insp.template_name}
             </div>
             <span
-              className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] ${
+              className={`px-2 py-0.5 rounded-full text-[10px] border ${
                 insp.status === "in_progress"
-                  ? "bg-amber-50 text-amber-700 border border-amber-200"
-                  : "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                  ? "bg-amber-50 border-amber-200 text-amber-700"
+                  : "bg-emerald-50 border-emerald-200 text-emerald-700"
               }`}
             >
               {statusLabel}
             </span>
             {insp.score !== null && (
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] bg-purple-50 text-purple-700 border border-purple-200">
+              <span className="px-2 py-0.5 rounded-full text-[10px] bg-purple-50 border border-purple-200 text-purple-700">
                 Score: {insp.score}%
               </span>
             )}
           </div>
-          <div className="text-[11px] text-gray-500 space-y-0.5">
-            <div>Site: {siteName}</div>
-            <div>Started: {formatDateTime(insp.started_at)}</div>
+          <div className="text-[11px] text-gray-500 space-x-2">
+            <span>Site: {siteName}</span>
+            <span>• Started: {formatDateTime(insp.started_at)}</span>
             {insp.submitted_at && (
-              <div>Completed: {formatDateTime(insp.submitted_at)}</div>
-            )}
-            {insp.owner_name && (
-              <div>Inspector: {insp.owner_name}</div>
+              <span>• Completed: {formatDateTime(insp.submitted_at)}</span>
             )}
           </div>
+          {insp.owner_name && (
+            <div className="text-[11px] text-gray-500">
+              Inspector: {insp.owner_name}
+            </div>
+          )}
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-2 justify-end text-xs">
+      <div className="flex flex-wrap gap-2 justify-end">
         <button
           onClick={onOpen}
-          className="px-3 py-1.5 rounded-xl bg-purple-700 text-white hover:bg-purple-800"
+          className="px-3 py-1.5 rounded-xl border text-xs hover:bg-gray-50"
         >
           Open
         </button>
@@ -1554,4 +1636,4 @@ const InspectionRowCard: React.FC<InspectionRowCardProps> = ({
       </div>
     </div>
   );
-};
+}
