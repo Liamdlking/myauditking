@@ -40,6 +40,9 @@ export default function UsersPage() {
   const [creatingBulk, setCreatingBulk] = useState(false);
   const [bulkResult, setBulkResult] = useState<string | null>(null);
 
+  // Search / find user
+  const [searchQuery, setSearchQuery] = useState("");
+
   // --------------------------
   // Helpers to load sites + users
   // --------------------------
@@ -246,7 +249,6 @@ export default function UsersPage() {
       }
 
       alert("User updated.");
-      // Optional: reload users so everything is fresh
       await loadUsers();
     } catch (e: any) {
       console.error("handleSaveUser error", e);
@@ -287,7 +289,7 @@ export default function UsersPage() {
         throw new Error("User was not created.");
       }
 
-      // 2) Insert profile (no site_access column here)
+      // 2) Insert profile
       const { error: profileErr } = await supabase
         .from("profiles")
         .insert({
@@ -314,7 +316,6 @@ export default function UsersPage() {
         if (linksErr) throw linksErr;
       }
 
-      // 4) Reload users so new user appears in table
       await loadUsers();
 
       // Reset form
@@ -474,6 +475,17 @@ export default function UsersPage() {
   };
 
   // --------------------------
+  // Filtered users for search
+  // --------------------------
+  const filteredUsers = users.filter((u) => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return true;
+    const name = (u.name || "").toLowerCase();
+    const email = (u.email || "").toLowerCase();
+    return name.includes(q) || email.includes(q);
+  });
+
+  // --------------------------
   // Render
   // --------------------------
   if (loading) {
@@ -498,13 +510,24 @@ export default function UsersPage() {
 
   return (
     <div className="max-w-6xl mx-auto py-6 space-y-4">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-purple-700">Users</h1>
           <p className="text-sm text-gray-600">
             Create users, assign roles and sites. Managers and inspectors only
             see templates and inspections for their assigned sites.
           </p>
+        </div>
+
+        {/* Find user input */}
+        <div className="w-full md:w-64">
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Find user by name or email..."
+            className="w-full border rounded-xl px-3 py-2 text-sm"
+          />
         </div>
       </div>
 
@@ -673,7 +696,7 @@ bob@example.com,9999,Bob Jones,inspector,Site A`}
               </tr>
             </thead>
             <tbody>
-              {users.map((u) => {
+              {filteredUsers.map((u) => {
                 const isRowSaving = savingUserId === u.user_id;
                 const isAdminRole = u.role === "admin";
 
