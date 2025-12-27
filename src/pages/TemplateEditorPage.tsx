@@ -840,6 +840,7 @@ export default function TemplateEditorPage({ mode }: Props) {
                                   <option value="text">
                                     Text only
                                   </option>
+<option value="signature">Signature</option>
                                 </select>
                                 <label className="inline-flex items-center gap-1 text-[11px]">
                                   <input
