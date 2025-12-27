@@ -764,6 +764,12 @@ export default function TemplateEditorPage({ mode }: Props) {
                     >
                       Yes / No / N/A
                     </button>
+<button
+  onClick={() => addQuestion(section.id, "signature")}
+  className="px-2 py-0.5 border rounded-xl hover:bg-gray-50"
+>
+  Signature
+</button>
                     <button
                       onClick={() =>
                         addQuestion(section.id, "good_fair_poor")
