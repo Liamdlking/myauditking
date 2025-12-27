@@ -5,7 +5,12 @@ import { supabase } from "@/utils/supabaseClient";
 
 type Role = "admin" | "manager" | "inspector" | string | null;
 
-type QuestionType = "yes_no_na" | "good_fair_poor" | "multiple_choice" | "text";
+type QuestionType =
+  | "yes_no_na"
+  | "good_fair_poor"
+  | "multiple_choice"
+  | "text"
+  | "signature";
 
 type TemplateQuestion = {
   id: string;
